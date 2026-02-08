@@ -370,12 +370,18 @@ impl MonitorView {
     }
 
     /// Apply snapping to a monitor after drag ends.
+    /// Ensures no gaps - monitors must always be adjacent to at least one other.
     fn apply_snap(&mut self, dragged_idx: usize) {
+        if self.monitors.len() < 2 {
+            return;
+        }
+
         let mut snap_x: Option<i32> = None;
         let mut snap_y: Option<i32> = None;
 
         let dragged = self.monitors[dragged_idx].scaled_rect;
 
+        // First pass: threshold-based snapping for fine alignment
         for (i, other) in self.monitors.iter().enumerate() {
             if i == dragged_idx {
                 continue;
@@ -422,12 +428,113 @@ impl MonitorView {
             }
         }
 
-        // Apply snaps
+        // Apply threshold snaps
         if let Some(x) = snap_x {
             self.monitors[dragged_idx].scaled_rect.x = x;
         }
         if let Some(y) = snap_y {
             self.monitors[dragged_idx].scaled_rect.y = y;
+        }
+
+        // Second pass: close gaps - ensure monitor is adjacent to at least one other
+        let dragged = self.monitors[dragged_idx].scaled_rect;
+        if !self.is_adjacent_to_any(dragged_idx) {
+            self.snap_to_nearest(dragged_idx, dragged);
+        }
+    }
+
+    /// Check if a monitor is adjacent (touching) any other monitor.
+    fn is_adjacent_to_any(&self, monitor_idx: usize) -> bool {
+        let rect = self.monitors[monitor_idx].scaled_rect;
+
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == monitor_idx {
+                continue;
+            }
+
+            if self.rects_adjacent(rect, other.scaled_rect) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if two rects are adjacent (touching edges, with possible overlap on perpendicular axis).
+    fn rects_adjacent(&self, a: Rect, b: Rect) -> bool {
+        // Check if they overlap on one axis and touch on the other
+        let a_right = a.x + a.width as i32;
+        let a_bottom = a.y + a.height as i32;
+        let b_right = b.x + b.width as i32;
+        let b_bottom = b.y + b.height as i32;
+
+        // Horizontal adjacency: a's right touches b's left OR a's left touches b's right
+        // AND they overlap vertically
+        let horiz_touch = a_right == b.x || a.x == b_right;
+        let vert_overlap = a.y < b_bottom && a_bottom > b.y;
+
+        // Vertical adjacency: a's bottom touches b's top OR a's top touches b's bottom
+        // AND they overlap horizontally
+        let vert_touch = a_bottom == b.y || a.y == b_bottom;
+        let horiz_overlap = a.x < b_right && a_right > b.x;
+
+        (horiz_touch && vert_overlap) || (vert_touch && horiz_overlap)
+    }
+
+    /// Snap a monitor to be adjacent to the nearest other monitor.
+    fn snap_to_nearest(&mut self, dragged_idx: usize, dragged: Rect) {
+        let dragged_center_x = dragged.x + dragged.width as i32 / 2;
+        let dragged_center_y = dragged.y + dragged.height as i32 / 2;
+
+        let mut best_snap: Option<(i32, i32, i32)> = None; // (new_x, new_y, distance)
+
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == dragged_idx {
+                continue;
+            }
+
+            let other_rect = other.scaled_rect;
+
+            // Calculate potential snap positions (adjacent to this monitor)
+            let snaps = [
+                // Snap to right of other
+                (
+                    other_rect.x + other_rect.width as i32,
+                    other_rect.y,
+                ),
+                // Snap to left of other
+                (
+                    other_rect.x - dragged.width as i32,
+                    other_rect.y,
+                ),
+                // Snap to bottom of other
+                (
+                    other_rect.x,
+                    other_rect.y + other_rect.height as i32,
+                ),
+                // Snap to top of other
+                (
+                    other_rect.x,
+                    other_rect.y - dragged.height as i32,
+                ),
+            ];
+
+            for (new_x, new_y) in snaps {
+                let new_center_x = new_x + dragged.width as i32 / 2;
+                let new_center_y = new_y + dragged.height as i32 / 2;
+
+                // Distance from current position to this snap position
+                let dist = (dragged_center_x - new_center_x).abs()
+                    + (dragged_center_y - new_center_y).abs();
+
+                if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                    best_snap = Some((new_x, new_y, dist));
+                }
+            }
+        }
+
+        if let Some((new_x, new_y, _)) = best_snap {
+            self.monitors[dragged_idx].scaled_rect.x = new_x;
+            self.monitors[dragged_idx].scaled_rect.y = new_y;
         }
     }
 
