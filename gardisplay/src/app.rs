@@ -141,8 +141,13 @@ impl App {
         // Create UI widgets (positioned in controls area)
         let controls_y = (WINDOW_HEIGHT - 100) as i32;
 
-        // Profile dropdown on the left
-        let mut dropdown_profiles = Dropdown::new(10, controls_y + 60, 150, 32);
+        // Buttons on the left
+        let btn_apply = Button::new(10, controls_y + 60, 70, 32, "Apply");
+        let btn_revert = Button::new(90, controls_y + 60, 70, 32, "Revert");
+        let btn_save = Button::new(170, controls_y + 60, 60, 32, "Save");
+
+        // Profile dropdown and Save As on the right
+        let mut dropdown_profiles = Dropdown::new(WINDOW_WIDTH as i32 - 260, controls_y + 60, 150, 32);
         let profile_names: Vec<String> = config.profiles.keys().cloned().collect();
         let current_profile = config.general.default_profile.clone();
         if profile_names.is_empty() {
@@ -151,11 +156,6 @@ impl App {
             dropdown_profiles.set_items(profile_names);
         }
         dropdown_profiles.set_selected_by_name(&current_profile);
-
-        // Buttons on the right
-        let btn_apply = Button::new(WINDOW_WIDTH as i32 - 370, controls_y + 60, 80, 32, "Apply");
-        let btn_revert = Button::new(WINDOW_WIDTH as i32 - 280, controls_y + 60, 80, 32, "Revert");
-        let btn_save = Button::new(WINDOW_WIDTH as i32 - 190, controls_y + 60, 80, 32, "Save");
         let btn_save_as = Button::new(WINDOW_WIDTH as i32 - 100, controls_y + 60, 90, 32, "Save As");
 
         Ok(Self {
@@ -327,10 +327,10 @@ impl App {
             return EventResult::Redraw;
         }
         if self.btn_save_as.handle_event(event) {
-            // Show save-as input
+            // Show save-as input (appears above the dropdown)
             let size = self.renderer.size();
             let controls_y = size.height.saturating_sub(100) as i32;
-            let mut input = TextInput::new(180, controls_y + 60, 150, 32);
+            let mut input = TextInput::new(size.width as i32 - 260, controls_y + 25, 150, 32);
             input.set_placeholder("Profile name");
             input.set_active(true);
             self.save_as_input = Some(input);
@@ -688,15 +688,19 @@ impl App {
 
         // Reposition widgets
         let controls_y = size.height.saturating_sub(100) as i32;
-        self.dropdown_profiles.set_position(10, controls_y + 60);
-        self.btn_apply.set_position(size.width as i32 - 370, controls_y + 60);
-        self.btn_revert.set_position(size.width as i32 - 280, controls_y + 60);
-        self.btn_save.set_position(size.width as i32 - 190, controls_y + 60);
+
+        // Buttons on the left
+        self.btn_apply.set_position(10, controls_y + 60);
+        self.btn_revert.set_position(90, controls_y + 60);
+        self.btn_save.set_position(170, controls_y + 60);
+
+        // Dropdown and Save As on the right
+        self.dropdown_profiles.set_position(size.width as i32 - 260, controls_y + 60);
         self.btn_save_as.set_position(size.width as i32 - 100, controls_y + 60);
 
-        // Reposition save-as input if active
+        // Reposition save-as input if active (next to dropdown)
         if let Some(ref mut input) = self.save_as_input {
-            input.set_position(180, controls_y + 60);
+            input.set_position(size.width as i32 - 260, controls_y + 25);
         }
     }
 
@@ -741,7 +745,7 @@ impl App {
             self.theme.item_description,
         )?;
 
-        // Status message (show for 3 seconds)
+        // Status message (show for 3 seconds) - after the left buttons
         if let Some((ref msg, instant)) = self.status_message {
             if instant.elapsed().as_secs() < 3 {
                 let color = if msg.contains("error") || msg.contains("Failed") {
@@ -750,27 +754,33 @@ impl App {
                     Color::new(0.4, 0.8, 0.4, 1.0) // Green
                 };
                 self.renderer
-                    .text_default(msg, 10.0, (controls_y + 60) as f64, color)?;
+                    .text_default(msg, 250.0, (controls_y + 70) as f64, color)?;
             }
         }
 
-        // Dirty indicator (above buttons)
+        // Profile label and dirty indicator (above dropdown on right)
         if self.monitor_view.is_dirty() {
+            // Show "Profile: * unsaved" when dirty
+            self.renderer.text_default(
+                "Profile:",
+                (size.width - 260) as f64,
+                (controls_y + 45) as f64,
+                self.theme.item_description,
+            )?;
             self.renderer.text_default(
                 "* unsaved",
-                (size.width - 370) as f64,
+                (size.width - 200) as f64,
                 (controls_y + 45) as f64,
                 Color::new(1.0, 0.7, 0.3, 1.0), // Orange
             )?;
+        } else {
+            self.renderer.text_default(
+                "Profile:",
+                (size.width - 260) as f64,
+                (controls_y + 45) as f64,
+                self.theme.item_description,
+            )?;
         }
-
-        // Profile label
-        self.renderer.text_default(
-            "Profile:",
-            10.0,
-            (controls_y + 45) as f64,
-            self.theme.item_description,
-        )?;
 
         // Render dropdown
         self.dropdown_profiles.render(&self.renderer, &self.theme)?;
