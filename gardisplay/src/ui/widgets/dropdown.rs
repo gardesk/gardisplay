@@ -286,10 +286,9 @@ impl Dropdown {
         renderer.fill_rounded_rect(self.rect, 6.0, bg)?;
         renderer.stroke_rounded_rect(self.rect, 6.0, theme.border, 1.0)?;
 
-        // Draw selected item text + dropdown indicator
+        // Draw selected item text (left-aligned)
         let text = self.selected_item().unwrap_or("(none)");
-        let display_text = format!("{} \u{25BC}", text); // ▼
-        let style = TextStyle::new()
+        let text_style = TextStyle::new()
             .font_family(&theme.font_family)
             .font_size(theme.font_size)
             .color(theme.foreground)
@@ -297,10 +296,24 @@ impl Dropdown {
         let text_rect = Rect::new(
             self.rect.x + 8,
             self.rect.y,
-            self.rect.width - 16,
+            self.rect.width - 28, // Leave room for arrow
             self.rect.height,
         );
-        renderer.text_in_rect(&display_text, text_rect, &style)?;
+        renderer.text_in_rect(text, text_rect, &text_style)?;
+
+        // Draw dropdown arrow (fixed position on right)
+        let arrow_style = TextStyle::new()
+            .font_family(&theme.font_family)
+            .font_size(theme.font_size)
+            .color(theme.foreground)
+            .align(TextAlign::Center);
+        let arrow_rect = Rect::new(
+            self.rect.x + self.rect.width as i32 - 20,
+            self.rect.y,
+            16,
+            self.rect.height,
+        );
+        renderer.text_in_rect("\u{25BC}", arrow_rect, &arrow_style)?; // ▼
 
         // Draw expanded list
         if self.expanded {

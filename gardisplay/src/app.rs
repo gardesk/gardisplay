@@ -288,6 +288,7 @@ impl App {
         }
 
         // Handle dropdown events
+        let was_expanded = self.dropdown_profiles.is_expanded();
         if let Some(action) = self.dropdown_profiles.handle_event(event) {
             match action {
                 DropdownAction::Select(_idx) => {
@@ -310,6 +311,10 @@ impl App {
                     }
                 }
             }
+            return EventResult::Redraw;
+        }
+        // Check if dropdown state changed (expand/collapse toggle)
+        if was_expanded != self.dropdown_profiles.is_expanded() {
             return EventResult::Redraw;
         }
 
