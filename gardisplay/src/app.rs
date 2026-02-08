@@ -263,12 +263,6 @@ impl App {
             return EventResult::Redraw;
         }
 
-        // Check if any button needs redraw from hover
-        if matches!(event, InputEvent::MouseMove(_)) {
-            // Buttons handle their own hover state
-            return EventResult::Redraw;
-        }
-
         match event {
             InputEvent::CloseRequested => EventResult::Quit,
             InputEvent::Key(e) if e.pressed && e.key == Key::Escape => EventResult::Quit,
