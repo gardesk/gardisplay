@@ -1,0 +1,6 @@
+docs/
+.vscode/
+.fackr/
+CLAUDE.md
+target/
+Cargo.lock
