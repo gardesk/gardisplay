@@ -763,29 +763,23 @@ impl App {
             }
         }
 
-        // Profile label and dirty indicator (above dropdown on right)
+        // Unsaved indicator (top right corner of footer)
         if self.monitor_view.is_dirty() {
-            // Show "Profile: * unsaved" when dirty
-            self.renderer.text_default(
-                "Profile:",
-                (size.width - 210) as f64,
-                (controls_y + 45) as f64,
-                self.theme.item_description,
-            )?;
             self.renderer.text_default(
                 "* unsaved",
-                (size.width - 150) as f64,
-                (controls_y + 45) as f64,
+                (size.width - 70) as f64,
+                (controls_y + 15) as f64,
                 Color::new(1.0, 0.7, 0.3, 1.0), // Orange
             )?;
-        } else {
-            self.renderer.text_default(
-                "Profile:",
-                (size.width - 210) as f64,
-                (controls_y + 45) as f64,
-                self.theme.item_description,
-            )?;
         }
+
+        // Profile label (above dropdown on right)
+        self.renderer.text_default(
+            "Profile:",
+            (size.width - 210) as f64,
+            (controls_y + 45) as f64,
+            self.theme.item_description,
+        )?;
 
         // Render dropdown
         self.dropdown_profiles.render(&self.renderer, &self.theme)?;

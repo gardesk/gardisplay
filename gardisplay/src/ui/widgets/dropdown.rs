@@ -286,8 +286,15 @@ impl Dropdown {
         renderer.fill_rounded_rect(self.rect, 6.0, bg)?;
         renderer.stroke_rounded_rect(self.rect, 6.0, theme.border, 1.0)?;
 
-        // Draw selected item text (left-aligned)
+        // Draw selected item text (left-aligned, ellipsized if too long)
         let text = self.selected_item().unwrap_or("(none)");
+        // Approximate max chars that fit (width - padding - arrow) / ~7px per char
+        let max_chars = ((self.rect.width - 28) / 7) as usize;
+        let display_text = if text.len() > max_chars && max_chars > 3 {
+            format!("{}...", &text[..max_chars - 3])
+        } else {
+            text.to_string()
+        };
         let text_style = TextStyle::new()
             .font_family(&theme.font_family)
             .font_size(theme.font_size)
@@ -299,7 +306,7 @@ impl Dropdown {
             self.rect.width - 28, // Leave room for arrow
             self.rect.height,
         );
-        renderer.text_in_rect(text, text_rect, &text_style)?;
+        renderer.text_in_rect(&display_text, text_rect, &text_style)?;
 
         // Draw dropdown arrow (fixed position on right)
         let arrow_style = TextStyle::new()
