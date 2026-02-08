@@ -1,7 +1,7 @@
 //! Simple button widget.
 
 use gartk_core::{InputEvent, MouseButton, Point, Rect, Theme};
-use gartk_render::Renderer;
+use gartk_render::{Renderer, TextAlign, TextStyle};
 
 /// A clickable button.
 pub struct Button {
@@ -90,10 +90,13 @@ impl Button {
         };
         renderer.stroke_rounded_rect(self.rect, 6.0, border_color, 1.0)?;
 
-        // Label (centered)
-        let text_x = self.rect.x as f64 + (self.rect.width as f64 / 2.0) - (self.label.len() as f64 * 3.5);
-        let text_y = self.rect.y as f64 + (self.rect.height as f64 / 2.0) - 6.0;
-        renderer.text_default(&self.label, text_x, text_y, text_color)?;
+        // Label (centered using text_in_rect)
+        let style = TextStyle::new()
+            .font_family(&theme.font_family)
+            .font_size(theme.font_size)
+            .color(text_color)
+            .align(TextAlign::Center);
+        renderer.text_in_rect(&self.label, self.rect, &style)?;
 
         Ok(())
     }
