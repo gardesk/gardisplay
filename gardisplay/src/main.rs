@@ -14,6 +14,10 @@ struct Args {
     /// Configuration file path
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Demo mode with fake monitors for UI testing
+    #[arg(long)]
+    demo: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,6 +34,6 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("starting gardisplay");
 
     let config = config::load_config(args.config.as_deref())?;
-    let mut app = app::App::new(config)?;
+    let mut app = app::App::new(config, args.demo)?;
     app.run()
 }

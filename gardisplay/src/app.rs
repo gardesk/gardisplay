@@ -28,7 +28,7 @@ pub struct App {
 
 impl App {
     /// Create a new application instance.
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: Config, demo: bool) -> Result<Self> {
         // Connect to X11
         let conn = Connection::connect(None)?;
         tracing::info!("connected to X11 display");
@@ -80,9 +80,14 @@ impl App {
         let view_rect = Rect::new(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT - 100); // Leave room for controls
         let mut monitor_view = MonitorView::new(view_rect);
 
-        // Detect monitors
-        let monitors = detect_monitors(&conn)?;
-        tracing::info!("detected {} monitors", monitors.len());
+        // Detect or create demo monitors
+        let monitors = if demo {
+            tracing::info!("demo mode: using fake monitors");
+            Self::demo_monitors()
+        } else {
+            detect_monitors(&conn)?
+        };
+        tracing::info!("using {} monitors", monitors.len());
         for m in &monitors {
             tracing::debug!(
                 "  {} {}x{} at ({}, {}) {}",
@@ -105,6 +110,33 @@ impl App {
             config,
             monitor_view,
         })
+    }
+
+    /// Create demo monitors for UI testing.
+    fn demo_monitors() -> Vec<gartk_x11::Monitor> {
+        vec![
+            gartk_x11::Monitor {
+                name: "eDP-1".to_string(),
+                rect: Rect::new(0, 0, 2560, 1600),
+                primary: true,
+                width_mm: 290,
+                height_mm: 180,
+            },
+            gartk_x11::Monitor {
+                name: "HDMI-1".to_string(),
+                rect: Rect::new(2560, 0, 1920, 1080),
+                primary: false,
+                width_mm: 530,
+                height_mm: 300,
+            },
+            gartk_x11::Monitor {
+                name: "DP-1".to_string(),
+                rect: Rect::new(2560, 1080, 1920, 1080),
+                primary: false,
+                width_mm: 530,
+                height_mm: 300,
+            },
+        ]
     }
 
     /// Run the application event loop.
