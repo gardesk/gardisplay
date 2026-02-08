@@ -381,8 +381,32 @@ impl MonitorView {
         self.snap_to_nearest(dragged_idx, dragged);
     }
 
+    /// Check if a rect overlaps with any monitor except the specified one.
+    fn would_overlap(&self, rect: Rect, exclude_idx: usize) -> bool {
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == exclude_idx {
+                continue;
+            }
+            if Self::rects_overlap(rect, other.scaled_rect) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if two rects overlap (share any interior area).
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        let a_right = a.x + a.width as i32;
+        let a_bottom = a.y + a.height as i32;
+        let b_right = b.x + b.width as i32;
+        let b_bottom = b.y + b.height as i32;
+
+        a.x < b_right && a_right > b.x && a.y < b_bottom && a_bottom > b.y
+    }
+
     /// Snap a monitor to be adjacent to the nearest other monitor.
     /// Uses directional awareness - snaps to the side the monitor was dropped on.
+    /// Ensures no overlaps with other monitors.
     fn snap_to_nearest(&mut self, dragged_idx: usize, dragged: Rect) {
         let dragged_center_x = dragged.x + dragged.width as i32 / 2;
         let dragged_center_y = dragged.y + dragged.height as i32 / 2;
@@ -402,44 +426,53 @@ impl MonitorView {
             let dx = dragged_center_x - other_center_x;
             let dy = dragged_center_y - other_center_y;
 
-            // Determine snap position based on which side we're dropping on
-            // Also align on the perpendicular axis to ensure actual adjacency
-            let (new_x, new_y) = if dx.abs() > dy.abs() {
-                // More horizontal - snap left or right
-                // Clamp y to ensure vertical overlap with the target
-                let clamped_y = dragged.y
-                    .max(other_rect.y - dragged.height as i32 + 1)
-                    .min(other_rect.y + other_rect.height as i32 - 1);
-                if dx > 0 {
-                    // Dropping to the right of other - snap to right side
-                    (other_rect.x + other_rect.width as i32, clamped_y)
-                } else {
-                    // Dropping to the left of other - snap to left side
-                    (other_rect.x - dragged.width as i32, clamped_y)
-                }
-            } else {
-                // More vertical - snap above or below
-                // Clamp x to ensure horizontal overlap with the target
-                let clamped_x = dragged.x
-                    .max(other_rect.x - dragged.width as i32 + 1)
-                    .min(other_rect.x + other_rect.width as i32 - 1);
-                if dy > 0 {
-                    // Dropping below other - snap to bottom
-                    (clamped_x, other_rect.y + other_rect.height as i32)
-                } else {
-                    // Dropping above other - snap to top
-                    (clamped_x, other_rect.y - dragged.height as i32)
-                }
-            };
+            // Try all 4 sides and pick the best non-overlapping position
+            let candidates = [
+                // Right of other
+                (other_rect.x + other_rect.width as i32, other_rect.y),
+                // Left of other
+                (other_rect.x - dragged.width as i32, other_rect.y),
+                // Below other
+                (other_rect.x, other_rect.y + other_rect.height as i32),
+                // Above other
+                (other_rect.x, other_rect.y - dragged.height as i32),
+            ];
 
-            // Distance from current position to this snap position
-            let new_center_x = new_x + dragged.width as i32 / 2;
-            let new_center_y = new_y + dragged.height as i32 / 2;
-            let dist = (dragged_center_x - new_center_x).abs()
-                + (dragged_center_y - new_center_y).abs();
+            // Score each candidate based on direction preference
+            for (new_x, new_y) in candidates {
+                let candidate_rect = Rect::new(new_x, new_y, dragged.width, dragged.height);
 
-            if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                best_snap = Some((new_x, new_y, dist));
+                // Skip if this position would overlap with another monitor
+                if self.would_overlap(candidate_rect, dragged_idx) {
+                    continue;
+                }
+
+                // Calculate distance with direction weighting
+                let new_center_x = new_x + dragged.width as i32 / 2;
+                let new_center_y = new_y + dragged.height as i32 / 2;
+
+                // Base distance
+                let mut dist = (dragged_center_x - new_center_x).abs()
+                    + (dragged_center_y - new_center_y).abs();
+
+                // Penalize positions that don't match the drag direction
+                let snap_dx = new_center_x - other_center_x;
+                let snap_dy = new_center_y - other_center_y;
+
+                // If we're dragging more horizontally, prefer horizontal snaps
+                if dx.abs() > dy.abs() {
+                    if (dx > 0) != (snap_dx > 0) {
+                        dist += 1000; // Penalize wrong horizontal direction
+                    }
+                } else {
+                    if (dy > 0) != (snap_dy > 0) {
+                        dist += 1000; // Penalize wrong vertical direction
+                    }
+                }
+
+                if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                    best_snap = Some((new_x, new_y, dist));
+                }
             }
         }
 
