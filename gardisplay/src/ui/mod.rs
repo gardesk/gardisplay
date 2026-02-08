@@ -1,8 +1,10 @@
 //! UI components for gardisplay.
 
 mod monitor_view;
+pub mod widgets;
 
 pub use monitor_view::MonitorView;
+pub use widgets::Button;
 
 /// Result of handling an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -629,6 +629,21 @@ impl MonitorView {
         &self.monitors
     }
 
+    /// Get mutable monitors.
+    pub fn monitors_mut(&mut self) -> &mut [MonitorState] {
+        &mut self.monitors
+    }
+
+    /// Set primary monitor by name.
+    pub fn set_primary(&mut self, name: &str) {
+        self.primary_name = Some(name.to_string());
+    }
+
+    /// Recalculate layout from real positions.
+    pub fn recalculate_layout(&mut self) {
+        self.recalculate_scaled_rects();
+    }
+
     /// Check if layout has been modified.
     #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn is_dirty(&self) -> bool {

@@ -9,9 +9,9 @@ use gartk_x11::{
 };
 use x11rb::protocol::xproto::ConnectionExt;
 
-use crate::config::{Config, MonitorConfig};
+use crate::config::{Config, MonitorConfig, Profile};
 use crate::randr::RandrManager;
-use crate::ui::{EventResult, MonitorView};
+use crate::ui::{Button, EventResult, MonitorView};
 
 /// Window dimensions.
 const WINDOW_WIDTH: u32 = 800;
@@ -25,13 +25,16 @@ pub struct App {
     renderer: Renderer,
     theme: Theme,
     gc: u32,
-    #[allow(dead_code)] // Used for profile management
     config: Config,
     monitor_view: MonitorView,
     randr: Option<RandrManager>,
     original_monitors: Vec<Monitor>,
     demo_mode: bool,
     status_message: Option<(String, std::time::Instant)>,
+    // UI buttons
+    btn_apply: Button,
+    btn_revert: Button,
+    btn_save: Button,
 }
 
 impl App {
@@ -125,6 +128,18 @@ impl App {
         let original_monitors = monitors.clone();
         monitor_view.set_monitors(monitors);
 
+        // Try to load saved profile
+        if let Some(profile) = config.profiles.get(&config.general.default_profile) {
+            tracing::info!("loading profile '{}'", config.general.default_profile);
+            Self::apply_profile_to_view(&mut monitor_view, profile);
+        }
+
+        // Create UI buttons (positioned in controls area)
+        let controls_y = (WINDOW_HEIGHT - 100) as i32;
+        let btn_apply = Button::new(WINDOW_WIDTH as i32 - 280, controls_y + 30, 80, 32, "Apply");
+        let btn_revert = Button::new(WINDOW_WIDTH as i32 - 190, controls_y + 30, 80, 32, "Revert");
+        let btn_save = Button::new(WINDOW_WIDTH as i32 - 100, controls_y + 30, 80, 32, "Save");
+
         Ok(Self {
             conn,
             window,
@@ -137,7 +152,41 @@ impl App {
             original_monitors,
             demo_mode: demo,
             status_message: None,
+            btn_apply,
+            btn_revert,
+            btn_save,
         })
+    }
+
+    /// Apply a saved profile to the monitor view.
+    fn apply_profile_to_view(view: &mut MonitorView, profile: &Profile) {
+        // Build a map of monitor name -> config
+        let config_map: std::collections::HashMap<&str, &MonitorConfig> = profile
+            .monitors
+            .iter()
+            .map(|m| (m.name.as_str(), m))
+            .collect();
+
+        // Update monitor positions from profile
+        for state in view.monitors_mut() {
+            if let Some(config) = config_map.get(state.info.name.as_str()) {
+                state.real_position = gartk_core::Point::new(config.x, config.y);
+                tracing::debug!(
+                    "loaded {} at ({}, {})",
+                    state.info.name,
+                    config.x,
+                    config.y
+                );
+            }
+        }
+
+        // Set primary monitor
+        if let Some(ref primary) = profile.primary {
+            view.set_primary(primary);
+        }
+
+        // Recalculate scaling
+        view.recalculate_layout();
     }
 
     /// Create demo monitors for UI testing.
@@ -200,6 +249,26 @@ impl App {
 
     /// Handle an input event.
     fn handle_event(&mut self, event: &InputEvent) -> EventResult {
+        // Handle button clicks
+        if self.btn_apply.handle_event(event) {
+            self.apply_layout();
+            return EventResult::Redraw;
+        }
+        if self.btn_revert.handle_event(event) {
+            self.revert_layout();
+            return EventResult::Redraw;
+        }
+        if self.btn_save.handle_event(event) {
+            self.save_profile();
+            return EventResult::Redraw;
+        }
+
+        // Check if any button needs redraw from hover
+        if matches!(event, InputEvent::MouseMove(_)) {
+            // Buttons handle their own hover state
+            return EventResult::Redraw;
+        }
+
         match event {
             InputEvent::CloseRequested => EventResult::Quit,
             InputEvent::Key(e) if e.pressed && e.key == Key::Escape => EventResult::Quit,
@@ -220,6 +289,11 @@ impl App {
                         || (e.modifiers.ctrl && e.key == Key::Char('r'))) =>
             {
                 self.revert_layout();
+                EventResult::Redraw
+            }
+            // Save: Ctrl+S
+            InputEvent::Key(e) if e.pressed && e.modifiers.ctrl && e.key == Key::Char('s') => {
+                self.save_profile();
                 EventResult::Redraw
             }
             InputEvent::Resize { width, height } => {
@@ -365,6 +439,47 @@ impl App {
         self.status_message = Some((message.to_string(), std::time::Instant::now()));
     }
 
+    /// Save current layout as a profile.
+    fn save_profile(&mut self) {
+        let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
+
+        // Build profile from current layout
+        let monitors: Vec<MonitorConfig> = self
+            .monitor_view
+            .monitors()
+            .iter()
+            .map(|state| MonitorConfig {
+                name: state.info.name.clone(),
+                enabled: true,
+                x: state.real_position.x,
+                y: state.real_position.y,
+                width: state.info.rect.width,
+                height: state.info.rect.height,
+                refresh: 60.0,
+                scale: 1.0,
+                rotation: 0,
+            })
+            .collect();
+
+        let profile = Profile {
+            primary: primary_name,
+            monitors,
+        };
+
+        // Save to default profile
+        self.config
+            .profiles
+            .insert("default".to_string(), profile);
+
+        match self.config.save() {
+            Ok(()) => self.set_status("Saved profile"),
+            Err(e) => {
+                tracing::error!("failed to save profile: {}", e);
+                self.set_status("Failed to save profile");
+            }
+        }
+    }
+
     /// Handle window resize.
     fn handle_resize(&mut self, size: Size) {
         tracing::debug!("resize to {}x{}", size.width, size.height);
@@ -378,6 +493,12 @@ impl App {
         // Update monitor view rect
         let view_rect = Rect::new(0, 0, size.width, size.height.saturating_sub(100));
         self.monitor_view.set_view_rect(view_rect);
+
+        // Reposition buttons
+        let controls_y = size.height.saturating_sub(100) as i32;
+        self.btn_apply.set_position(size.width as i32 - 280, controls_y + 30);
+        self.btn_revert.set_position(size.width as i32 - 190, controls_y + 30);
+        self.btn_save.set_position(size.width as i32 - 100, controls_y + 30);
     }
 
     /// Render the application.
@@ -405,45 +526,49 @@ impl App {
             1.0,
         )?;
 
-        // Instructions
+        // Left side: Instructions and status
         self.renderer.text_default(
-            "Drag monitors to arrange | Double-click to set primary",
+            "Drag monitors to arrange | Double-click: set primary",
             10.0,
-            (controls_y + 20) as f64,
+            (controls_y + 15) as f64,
             self.theme.foreground,
         )?;
 
-        // Keyboard shortcuts
+        // Keyboard shortcuts hint
         self.renderer.text_default(
-            "Enter: Apply | Backspace: Revert | Q/Esc: Quit",
+            "Ctrl+S: Save | Ctrl+A: Apply | Ctrl+R: Revert",
             10.0,
-            (controls_y + 40) as f64,
+            (controls_y + 35) as f64,
             self.theme.item_description,
         )?;
 
         // Status message (show for 3 seconds)
         if let Some((ref msg, instant)) = self.status_message {
             if instant.elapsed().as_secs() < 3 {
-                // Green for success, theme color otherwise
-                let color = if msg.contains("error") {
+                let color = if msg.contains("error") || msg.contains("Failed") {
                     Color::new(1.0, 0.4, 0.4, 1.0) // Red
                 } else {
                     Color::new(0.4, 0.8, 0.4, 1.0) // Green
                 };
                 self.renderer
-                    .text_default(msg, 10.0, (controls_y + 70) as f64, color)?;
+                    .text_default(msg, 10.0, (controls_y + 60) as f64, color)?;
             }
         }
 
-        // Dirty indicator
+        // Dirty indicator (above buttons)
         if self.monitor_view.is_dirty() {
             self.renderer.text_default(
-                "(unsaved changes)",
-                (size.width - 150) as f64,
-                (controls_y + 20) as f64,
+                "* unsaved",
+                (size.width - 280) as f64,
+                (controls_y + 15) as f64,
                 Color::new(1.0, 0.7, 0.3, 1.0), // Orange
             )?;
         }
+
+        // Render buttons
+        self.btn_apply.render(&self.renderer, &self.theme)?;
+        self.btn_revert.render(&self.renderer, &self.theme)?;
+        self.btn_save.render(&self.renderer, &self.theme)?;
 
         // Blit to window
         copy_surface_to_window(self.renderer.surface_mut(), &self.window, self.gc, 0, 0)?;
