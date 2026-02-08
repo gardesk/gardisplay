@@ -11,7 +11,7 @@ use x11rb::protocol::xproto::ConnectionExt;
 
 use crate::config::{Config, MonitorConfig, Profile};
 use crate::randr::RandrManager;
-use crate::ui::{Button, EventResult, MonitorView};
+use crate::ui::{Button, Dropdown, DropdownAction, EventResult, MonitorView, TextInput};
 
 /// Window dimensions.
 const WINDOW_WIDTH: u32 = 800;
@@ -31,10 +31,14 @@ pub struct App {
     original_monitors: Vec<Monitor>,
     demo_mode: bool,
     status_message: Option<(String, std::time::Instant)>,
-    // UI buttons
+    // UI widgets
+    current_profile: String,
+    dropdown_profiles: Dropdown,
     btn_apply: Button,
     btn_revert: Button,
     btn_save: Button,
+    btn_save_as: Button,
+    save_as_input: Option<TextInput>,
 }
 
 impl App {
@@ -134,11 +138,25 @@ impl App {
             Self::apply_profile_to_view(&mut monitor_view, profile);
         }
 
-        // Create UI buttons (positioned in controls area)
+        // Create UI widgets (positioned in controls area)
         let controls_y = (WINDOW_HEIGHT - 100) as i32;
-        let btn_apply = Button::new(WINDOW_WIDTH as i32 - 280, controls_y + 30, 80, 32, "Apply");
-        let btn_revert = Button::new(WINDOW_WIDTH as i32 - 190, controls_y + 30, 80, 32, "Revert");
-        let btn_save = Button::new(WINDOW_WIDTH as i32 - 100, controls_y + 30, 80, 32, "Save");
+
+        // Profile dropdown on the left
+        let mut dropdown_profiles = Dropdown::new(10, controls_y + 60, 150, 32);
+        let profile_names: Vec<String> = config.profiles.keys().cloned().collect();
+        let current_profile = config.general.default_profile.clone();
+        if profile_names.is_empty() {
+            dropdown_profiles.set_items(vec!["default".to_string()]);
+        } else {
+            dropdown_profiles.set_items(profile_names);
+        }
+        dropdown_profiles.set_selected_by_name(&current_profile);
+
+        // Buttons on the right
+        let btn_apply = Button::new(WINDOW_WIDTH as i32 - 370, controls_y + 60, 80, 32, "Apply");
+        let btn_revert = Button::new(WINDOW_WIDTH as i32 - 280, controls_y + 60, 80, 32, "Revert");
+        let btn_save = Button::new(WINDOW_WIDTH as i32 - 190, controls_y + 60, 80, 32, "Save");
+        let btn_save_as = Button::new(WINDOW_WIDTH as i32 - 100, controls_y + 60, 90, 32, "Save As");
 
         Ok(Self {
             conn,
@@ -152,9 +170,13 @@ impl App {
             original_monitors,
             demo_mode: demo,
             status_message: None,
+            current_profile,
+            dropdown_profiles,
             btn_apply,
             btn_revert,
             btn_save,
+            btn_save_as,
+            save_as_input: None,
         })
     }
 
@@ -249,6 +271,48 @@ impl App {
 
     /// Handle an input event.
     fn handle_event(&mut self, event: &InputEvent) -> EventResult {
+        // Handle save-as text input first (captures keyboard when active)
+        if let Some(ref mut input) = self.save_as_input {
+            if let Some(submitted) = input.handle_event(event) {
+                if submitted {
+                    let name = input.text().to_string();
+                    if !name.is_empty() {
+                        self.save_profile_as(&name);
+                    }
+                }
+                self.save_as_input = None;
+                return EventResult::Redraw;
+            }
+            // Text input is active, consume the event
+            return EventResult::Redraw;
+        }
+
+        // Handle dropdown events
+        if let Some(action) = self.dropdown_profiles.handle_event(event) {
+            match action {
+                DropdownAction::Select(_idx) => {
+                    if let Some(name) = self.dropdown_profiles.selected_item() {
+                        let name = name.to_string();
+                        self.load_profile(&name);
+                    }
+                }
+                DropdownAction::Rename(_idx, new_name) => {
+                    if let Some(old_name) = self.dropdown_profiles.selected_item() {
+                        let old = old_name.to_string();
+                        self.rename_profile(&old, &new_name);
+                    }
+                }
+                DropdownAction::Delete(idx) => {
+                    // Get name before modifying
+                    let names: Vec<String> = self.config.profiles.keys().cloned().collect();
+                    if let Some(name) = names.get(idx) {
+                        self.delete_profile(name);
+                    }
+                }
+            }
+            return EventResult::Redraw;
+        }
+
         // Handle button clicks
         if self.btn_apply.handle_event(event) {
             self.apply_layout();
@@ -260,6 +324,16 @@ impl App {
         }
         if self.btn_save.handle_event(event) {
             self.save_profile();
+            return EventResult::Redraw;
+        }
+        if self.btn_save_as.handle_event(event) {
+            // Show save-as input
+            let size = self.renderer.size();
+            let controls_y = size.height.saturating_sub(100) as i32;
+            let mut input = TextInput::new(180, controls_y + 60, 150, 32);
+            input.set_placeholder("Profile name");
+            input.set_active(true);
+            self.save_as_input = Some(input);
             return EventResult::Redraw;
         }
 
@@ -468,13 +542,134 @@ impl App {
         match self.config.save() {
             Ok(()) => {
                 self.monitor_view.clear_dirty();
-                self.set_status("Saved profile");
+                self.set_status(&format!("Saved profile '{}'", self.current_profile));
             }
             Err(e) => {
                 tracing::error!("failed to save profile: {}", e);
                 self.set_status("Failed to save profile");
             }
         }
+    }
+
+    /// Save current layout as a new named profile.
+    fn save_profile_as(&mut self, name: &str) {
+        let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
+
+        let monitors: Vec<MonitorConfig> = self
+            .monitor_view
+            .monitors()
+            .iter()
+            .map(|state| MonitorConfig {
+                name: state.info.name.clone(),
+                enabled: true,
+                x: state.real_position.x,
+                y: state.real_position.y,
+                width: state.info.rect.width,
+                height: state.info.rect.height,
+                refresh: 60.0,
+                scale: 1.0,
+                rotation: 0,
+            })
+            .collect();
+
+        let profile = Profile {
+            primary: primary_name,
+            monitors,
+        };
+
+        self.config.profiles.insert(name.to_string(), profile);
+        self.config.general.default_profile = name.to_string();
+        self.current_profile = name.to_string();
+
+        match self.config.save() {
+            Ok(()) => {
+                self.monitor_view.clear_dirty();
+                self.refresh_profile_list();
+                self.set_status(&format!("Created profile '{}'", name));
+            }
+            Err(e) => {
+                tracing::error!("failed to save profile: {}", e);
+                self.set_status("Failed to save profile");
+            }
+        }
+    }
+
+    /// Load a profile by name.
+    fn load_profile(&mut self, name: &str) {
+        if let Some(profile) = self.config.profiles.get(name) {
+            Self::apply_profile_to_view(&mut self.monitor_view, profile);
+            self.current_profile = name.to_string();
+            self.config.general.default_profile = name.to_string();
+            let _ = self.config.save(); // Save default profile selection
+            self.set_status(&format!("Loaded profile '{}'", name));
+        } else {
+            self.set_status(&format!("Profile '{}' not found", name));
+        }
+    }
+
+    /// Rename a profile.
+    fn rename_profile(&mut self, old_name: &str, new_name: &str) {
+        if old_name == new_name {
+            return;
+        }
+
+        if let Some(profile) = self.config.profiles.remove(old_name) {
+            self.config.profiles.insert(new_name.to_string(), profile);
+
+            // Update current profile if renamed
+            if self.current_profile == old_name {
+                self.current_profile = new_name.to_string();
+                self.config.general.default_profile = new_name.to_string();
+            }
+
+            match self.config.save() {
+                Ok(()) => {
+                    self.refresh_profile_list();
+                    self.set_status(&format!("Renamed '{}' to '{}'", old_name, new_name));
+                }
+                Err(e) => {
+                    tracing::error!("failed to save after rename: {}", e);
+                    self.set_status("Failed to rename profile");
+                }
+            }
+        }
+    }
+
+    /// Delete a profile.
+    fn delete_profile(&mut self, name: &str) {
+        // Don't delete if it's the only profile
+        if self.config.profiles.len() <= 1 {
+            self.set_status("Cannot delete the only profile");
+            return;
+        }
+
+        self.config.profiles.remove(name);
+
+        // Switch to another profile if we deleted the current one
+        if self.current_profile == name {
+            if let Some(other_name) = self.config.profiles.keys().next() {
+                let other = other_name.clone();
+                self.load_profile(&other);
+            }
+        }
+
+        match self.config.save() {
+            Ok(()) => {
+                self.refresh_profile_list();
+                self.set_status(&format!("Deleted profile '{}'", name));
+            }
+            Err(e) => {
+                tracing::error!("failed to save after delete: {}", e);
+                self.set_status("Failed to delete profile");
+            }
+        }
+    }
+
+    /// Refresh the profile dropdown list.
+    fn refresh_profile_list(&mut self) {
+        let names: Vec<String> = self.config.profiles.keys().cloned().collect();
+        self.dropdown_profiles.set_items(names);
+        self.dropdown_profiles.set_selected_by_name(&self.current_profile);
     }
 
     /// Handle window resize.
@@ -491,11 +686,18 @@ impl App {
         let view_rect = Rect::new(0, 0, size.width, size.height.saturating_sub(100));
         self.monitor_view.set_view_rect(view_rect);
 
-        // Reposition buttons
+        // Reposition widgets
         let controls_y = size.height.saturating_sub(100) as i32;
-        self.btn_apply.set_position(size.width as i32 - 280, controls_y + 30);
-        self.btn_revert.set_position(size.width as i32 - 190, controls_y + 30);
-        self.btn_save.set_position(size.width as i32 - 100, controls_y + 30);
+        self.dropdown_profiles.set_position(10, controls_y + 60);
+        self.btn_apply.set_position(size.width as i32 - 370, controls_y + 60);
+        self.btn_revert.set_position(size.width as i32 - 280, controls_y + 60);
+        self.btn_save.set_position(size.width as i32 - 190, controls_y + 60);
+        self.btn_save_as.set_position(size.width as i32 - 100, controls_y + 60);
+
+        // Reposition save-as input if active
+        if let Some(ref mut input) = self.save_as_input {
+            input.set_position(180, controls_y + 60);
+        }
     }
 
     /// Render the application.
@@ -556,16 +758,33 @@ impl App {
         if self.monitor_view.is_dirty() {
             self.renderer.text_default(
                 "* unsaved",
-                (size.width - 280) as f64,
-                (controls_y + 15) as f64,
+                (size.width - 370) as f64,
+                (controls_y + 45) as f64,
                 Color::new(1.0, 0.7, 0.3, 1.0), // Orange
             )?;
+        }
+
+        // Profile label
+        self.renderer.text_default(
+            "Profile:",
+            10.0,
+            (controls_y + 45) as f64,
+            self.theme.item_description,
+        )?;
+
+        // Render dropdown
+        self.dropdown_profiles.render(&self.renderer, &self.theme)?;
+
+        // Render save-as input if active (over dropdown area)
+        if let Some(ref input) = self.save_as_input {
+            input.render(&self.renderer, &self.theme)?;
         }
 
         // Render buttons
         self.btn_apply.render(&self.renderer, &self.theme)?;
         self.btn_revert.render(&self.renderer, &self.theme)?;
         self.btn_save.render(&self.renderer, &self.theme)?;
+        self.btn_save_as.render(&self.renderer, &self.theme)?;
 
         // Blit to window
         copy_surface_to_window(self.renderer.surface_mut(), &self.window, self.gc, 0, 0)?;
