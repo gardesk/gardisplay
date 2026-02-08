@@ -403,23 +403,32 @@ impl MonitorView {
             let dy = dragged_center_y - other_center_y;
 
             // Determine snap position based on which side we're dropping on
+            // Also align on the perpendicular axis to ensure actual adjacency
             let (new_x, new_y) = if dx.abs() > dy.abs() {
                 // More horizontal - snap left or right
+                // Clamp y to ensure vertical overlap with the target
+                let clamped_y = dragged.y
+                    .max(other_rect.y - dragged.height as i32 + 1)
+                    .min(other_rect.y + other_rect.height as i32 - 1);
                 if dx > 0 {
                     // Dropping to the right of other - snap to right side
-                    (other_rect.x + other_rect.width as i32, dragged.y)
+                    (other_rect.x + other_rect.width as i32, clamped_y)
                 } else {
                     // Dropping to the left of other - snap to left side
-                    (other_rect.x - dragged.width as i32, dragged.y)
+                    (other_rect.x - dragged.width as i32, clamped_y)
                 }
             } else {
                 // More vertical - snap above or below
+                // Clamp x to ensure horizontal overlap with the target
+                let clamped_x = dragged.x
+                    .max(other_rect.x - dragged.width as i32 + 1)
+                    .min(other_rect.x + other_rect.width as i32 - 1);
                 if dy > 0 {
                     // Dropping below other - snap to bottom
-                    (dragged.x, other_rect.y + other_rect.height as i32)
+                    (clamped_x, other_rect.y + other_rect.height as i32)
                 } else {
                     // Dropping above other - snap to top
-                    (dragged.x, other_rect.y - dragged.height as i32)
+                    (clamped_x, other_rect.y - dragged.height as i32)
                 }
             };
 
