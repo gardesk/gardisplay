@@ -370,85 +370,164 @@ impl MonitorView {
     }
 
     /// Apply snapping to a monitor after drag ends.
-    /// Snaps edges to nearby edges while preserving the user's intended position.
+    /// Snaps edges to nearby edges while ensuring adjacency (no gaps).
     fn apply_snap(&mut self, dragged_idx: usize) {
         if self.monitors.len() < 2 {
             return;
         }
 
         let mut dragged = self.monitors[dragged_idx].scaled_rect;
+
+        // Step 1: Find best edge snaps within threshold
+        let (snapped_x, snapped_y) = self.find_edge_snaps(dragged_idx, dragged);
+
+        if let Some(x) = snapped_x {
+            dragged.x = x;
+        }
+        if let Some(y) = snapped_y {
+            dragged.y = y;
+        }
+
+        // Check for overlap
+        if self.would_overlap(dragged, dragged_idx) {
+            return;
+        }
+
+        // Step 2: Check if result is adjacent to any monitor
+        if self.is_adjacent_to_any(dragged, dragged_idx) {
+            self.monitors[dragged_idx].scaled_rect = dragged;
+            return;
+        }
+
+        // Step 3: Not adjacent - snap to nearest adjacency position
+        // Preserve as much of the user's position as possible
+        if let Some(adj_pos) = self.find_nearest_adjacent_position(dragged_idx, dragged) {
+            self.monitors[dragged_idx].scaled_rect = adj_pos;
+        }
+    }
+
+    /// Find edge snaps within threshold for each axis.
+    fn find_edge_snaps(&self, dragged_idx: usize, dragged: Rect) -> (Option<i32>, Option<i32>) {
         let dragged_right = dragged.x + dragged.width as i32;
         let dragged_bottom = dragged.y + dragged.height as i32;
 
-        // Find best edge snaps independently for each axis
-        let mut best_x_snap: Option<(i32, i32)> = None; // (new_x, distance)
-        let mut best_y_snap: Option<(i32, i32)> = None; // (new_y, distance)
+        let mut best_x: Option<(i32, i32)> = None;
+        let mut best_y: Option<(i32, i32)> = None;
 
         for (i, other) in self.monitors.iter().enumerate() {
             if i == dragged_idx {
                 continue;
             }
 
-            let other_rect = other.scaled_rect;
-            let other_right = other_rect.x + other_rect.width as i32;
-            let other_bottom = other_rect.y + other_rect.height as i32;
+            let r = other.scaled_rect;
+            let r_right = r.x + r.width as i32;
+            let r_bottom = r.y + r.height as i32;
 
-            // X-axis edge snaps (for adjacency - touching edges)
+            // X snaps: adjacency (left-to-right, right-to-left) and alignment (left-to-left, right-to-right)
             let x_snaps = [
-                // Dragged left edge to other right edge (place right of other)
-                (other_right, (dragged.x - other_right).abs()),
-                // Dragged right edge to other left edge (place left of other)
-                (other_rect.x - dragged.width as i32, (dragged_right - other_rect.x).abs()),
-                // Dragged left edge to other left edge (align left edges)
-                (other_rect.x, (dragged.x - other_rect.x).abs()),
-                // Dragged right edge to other right edge (align right edges)
-                (other_right - dragged.width as i32, (dragged_right - other_right).abs()),
+                (r_right, (dragged.x - r_right).abs()),                           // left edge to right edge
+                (r.x - dragged.width as i32, (dragged_right - r.x).abs()),        // right edge to left edge
+                (r.x, (dragged.x - r.x).abs()),                                   // left to left
+                (r_right - dragged.width as i32, (dragged_right - r_right).abs()), // right to right
             ];
 
             for (new_x, dist) in x_snaps {
-                if dist < SNAP_THRESHOLD {
-                    if best_x_snap.map_or(true, |(_, best_dist)| dist < best_dist) {
-                        best_x_snap = Some((new_x, dist));
-                    }
+                if dist < SNAP_THRESHOLD && best_x.map_or(true, |(_, d)| dist < d) {
+                    best_x = Some((new_x, dist));
                 }
             }
 
-            // Y-axis edge snaps
+            // Y snaps
             let y_snaps = [
-                // Dragged top edge to other bottom edge (place below other)
-                (other_bottom, (dragged.y - other_bottom).abs()),
-                // Dragged bottom edge to other top edge (place above other)
-                (other_rect.y - dragged.height as i32, (dragged_bottom - other_rect.y).abs()),
-                // Dragged top edge to other top edge (align top edges)
-                (other_rect.y, (dragged.y - other_rect.y).abs()),
-                // Dragged bottom edge to other bottom edge (align bottom edges)
-                (other_bottom - dragged.height as i32, (dragged_bottom - other_bottom).abs()),
+                (r_bottom, (dragged.y - r_bottom).abs()),                            // top to bottom
+                (r.y - dragged.height as i32, (dragged_bottom - r.y).abs()),         // bottom to top
+                (r.y, (dragged.y - r.y).abs()),                                      // top to top
+                (r_bottom - dragged.height as i32, (dragged_bottom - r_bottom).abs()), // bottom to bottom
             ];
 
             for (new_y, dist) in y_snaps {
-                if dist < SNAP_THRESHOLD {
-                    if best_y_snap.map_or(true, |(_, best_dist)| dist < best_dist) {
-                        best_y_snap = Some((new_y, dist));
-                    }
+                if dist < SNAP_THRESHOLD && best_y.map_or(true, |(_, d)| dist < d) {
+                    best_y = Some((new_y, dist));
                 }
             }
         }
 
-        // Apply snaps
-        if let Some((new_x, _)) = best_x_snap {
-            dragged.x = new_x;
+        (best_x.map(|(x, _)| x), best_y.map(|(y, _)| y))
+    }
+
+    /// Check if rect is adjacent to any other monitor.
+    fn is_adjacent_to_any(&self, rect: Rect, exclude_idx: usize) -> bool {
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == exclude_idx {
+                continue;
+            }
+            if Self::rects_adjacent(rect, other.scaled_rect) {
+                return true;
+            }
         }
-        if let Some((new_y, _)) = best_y_snap {
-            dragged.y = new_y;
+        false
+    }
+
+    /// Check if two rects are adjacent (touching edges with overlap on perpendicular axis).
+    fn rects_adjacent(a: Rect, b: Rect) -> bool {
+        let a_right = a.x + a.width as i32;
+        let a_bottom = a.y + a.height as i32;
+        let b_right = b.x + b.width as i32;
+        let b_bottom = b.y + b.height as i32;
+
+        // Horizontal adjacency: right edge touches left edge (or vice versa) with vertical overlap
+        let h_adjacent = (a_right == b.x || a.x == b_right)
+            && a.y < b_bottom && a_bottom > b.y;
+
+        // Vertical adjacency: bottom edge touches top edge (or vice versa) with horizontal overlap
+        let v_adjacent = (a_bottom == b.y || a.y == b_bottom)
+            && a.x < b_right && a_right > b.x;
+
+        h_adjacent || v_adjacent
+    }
+
+    /// Find the nearest position that makes the rect adjacent to another monitor.
+    fn find_nearest_adjacent_position(&self, dragged_idx: usize, dragged: Rect) -> Option<Rect> {
+        let mut best: Option<(Rect, i32)> = None;
+
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == dragged_idx {
+                continue;
+            }
+
+            let r = other.scaled_rect;
+            let r_right = r.x + r.width as i32;
+            let r_bottom = r.y + r.height as i32;
+
+            // Try 4 adjacent positions, preserving the perpendicular coordinate
+            let candidates = [
+                // Right of other (preserve y)
+                Rect::new(r_right, dragged.y, dragged.width, dragged.height),
+                // Left of other (preserve y)
+                Rect::new(r.x - dragged.width as i32, dragged.y, dragged.width, dragged.height),
+                // Below other (preserve x)
+                Rect::new(dragged.x, r_bottom, dragged.width, dragged.height),
+                // Above other (preserve x)
+                Rect::new(dragged.x, r.y - dragged.height as i32, dragged.width, dragged.height),
+            ];
+
+            for candidate in candidates {
+                // Must be adjacent and not overlap
+                if !Self::rects_adjacent(candidate, r) {
+                    continue;
+                }
+                if self.would_overlap(candidate, dragged_idx) {
+                    continue;
+                }
+
+                let dist = (candidate.x - dragged.x).abs() + (candidate.y - dragged.y).abs();
+                if best.map_or(true, |(_, d)| dist < d) {
+                    best = Some((candidate, dist));
+                }
+            }
         }
 
-        // Check for overlap and resolve if needed
-        if self.would_overlap(dragged, dragged_idx) {
-            // Revert to original position if we'd overlap
-            return;
-        }
-
-        self.monitors[dragged_idx].scaled_rect = dragged;
+        best.map(|(rect, _)| rect)
     }
 
     /// Check if a rect overlaps with any monitor except the specified one.
