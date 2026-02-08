@@ -147,7 +147,7 @@ impl App {
         let btn_save = Button::new(170, controls_y + 60, 60, 32, "Save");
 
         // Profile dropdown and Save As on the right
-        let mut dropdown_profiles = Dropdown::new(WINDOW_WIDTH as i32 - 260, controls_y + 60, 150, 32);
+        let mut dropdown_profiles = Dropdown::new(WINDOW_WIDTH as i32 - 210, controls_y + 60, 100, 32);
         let profile_names: Vec<String> = config.profiles.keys().cloned().collect();
         let current_profile = config.general.default_profile.clone();
         if profile_names.is_empty() {
@@ -695,12 +695,12 @@ impl App {
         self.btn_save.set_position(170, controls_y + 60);
 
         // Dropdown and Save As on the right
-        self.dropdown_profiles.set_position(size.width as i32 - 260, controls_y + 60);
+        self.dropdown_profiles.set_position(size.width as i32 - 210, controls_y + 60);
         self.btn_save_as.set_position(size.width as i32 - 100, controls_y + 60);
 
-        // Reposition save-as input if active (next to dropdown)
+        // Reposition save-as input if active (above dropdown)
         if let Some(ref mut input) = self.save_as_input {
-            input.set_position(size.width as i32 - 260, controls_y + 25);
+            input.set_position(size.width as i32 - 210, controls_y + 25);
         }
     }
 
@@ -763,20 +763,20 @@ impl App {
             // Show "Profile: * unsaved" when dirty
             self.renderer.text_default(
                 "Profile:",
-                (size.width - 260) as f64,
+                (size.width - 210) as f64,
                 (controls_y + 45) as f64,
                 self.theme.item_description,
             )?;
             self.renderer.text_default(
                 "* unsaved",
-                (size.width - 200) as f64,
+                (size.width - 150) as f64,
                 (controls_y + 45) as f64,
                 Color::new(1.0, 0.7, 0.3, 1.0), // Orange
             )?;
         } else {
             self.renderer.text_default(
                 "Profile:",
-                (size.width - 260) as f64,
+                (size.width - 210) as f64,
                 (controls_y + 45) as f64,
                 self.theme.item_description,
             )?;
