@@ -481,6 +481,7 @@ impl MonitorView {
     }
 
     /// Snap a monitor to be adjacent to the nearest other monitor.
+    /// Uses directional awareness - snaps to the side the monitor was dropped on.
     fn snap_to_nearest(&mut self, dragged_idx: usize, dragged: Rect) {
         let dragged_center_x = dragged.x + dragged.width as i32 / 2;
         let dragged_center_y = dragged.y + dragged.height as i32 / 2;
@@ -493,42 +494,42 @@ impl MonitorView {
             }
 
             let other_rect = other.scaled_rect;
+            let other_center_x = other_rect.x + other_rect.width as i32 / 2;
+            let other_center_y = other_rect.y + other_rect.height as i32 / 2;
 
-            // Calculate potential snap positions (adjacent to this monitor)
-            let snaps = [
-                // Snap to right of other
-                (
-                    other_rect.x + other_rect.width as i32,
-                    other_rect.y,
-                ),
-                // Snap to left of other
-                (
-                    other_rect.x - dragged.width as i32,
-                    other_rect.y,
-                ),
-                // Snap to bottom of other
-                (
-                    other_rect.x,
-                    other_rect.y + other_rect.height as i32,
-                ),
-                // Snap to top of other
-                (
-                    other_rect.x,
-                    other_rect.y - dragged.height as i32,
-                ),
-            ];
+            // Determine which side of the other monitor we're on
+            let dx = dragged_center_x - other_center_x;
+            let dy = dragged_center_y - other_center_y;
 
-            for (new_x, new_y) in snaps {
-                let new_center_x = new_x + dragged.width as i32 / 2;
-                let new_center_y = new_y + dragged.height as i32 / 2;
-
-                // Distance from current position to this snap position
-                let dist = (dragged_center_x - new_center_x).abs()
-                    + (dragged_center_y - new_center_y).abs();
-
-                if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                    best_snap = Some((new_x, new_y, dist));
+            // Determine snap position based on which side we're dropping on
+            let (new_x, new_y) = if dx.abs() > dy.abs() {
+                // More horizontal - snap left or right
+                if dx > 0 {
+                    // Dropping to the right of other - snap to right side
+                    (other_rect.x + other_rect.width as i32, dragged.y)
+                } else {
+                    // Dropping to the left of other - snap to left side
+                    (other_rect.x - dragged.width as i32, dragged.y)
                 }
+            } else {
+                // More vertical - snap above or below
+                if dy > 0 {
+                    // Dropping below other - snap to bottom
+                    (dragged.x, other_rect.y + other_rect.height as i32)
+                } else {
+                    // Dropping above other - snap to top
+                    (dragged.x, other_rect.y - dragged.height as i32)
+                }
+            };
+
+            // Distance from current position to this snap position
+            let new_center_x = new_x + dragged.width as i32 / 2;
+            let new_center_y = new_y + dragged.height as i32 / 2;
+            let dist = (dragged_center_x - new_center_x).abs()
+                + (dragged_center_y - new_center_y).abs();
+
+            if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                best_snap = Some((new_x, new_y, dist));
             }
         }
 
