@@ -370,15 +370,85 @@ impl MonitorView {
     }
 
     /// Apply snapping to a monitor after drag ends.
-    /// Ensures no gaps - monitors must always be adjacent to at least one other.
+    /// Snaps edges to nearby edges while preserving the user's intended position.
     fn apply_snap(&mut self, dragged_idx: usize) {
         if self.monitors.len() < 2 {
             return;
         }
 
-        // Always snap to nearest to ensure adjacency, using directional awareness
-        let dragged = self.monitors[dragged_idx].scaled_rect;
-        self.snap_to_nearest(dragged_idx, dragged);
+        let mut dragged = self.monitors[dragged_idx].scaled_rect;
+        let dragged_right = dragged.x + dragged.width as i32;
+        let dragged_bottom = dragged.y + dragged.height as i32;
+
+        // Find best edge snaps independently for each axis
+        let mut best_x_snap: Option<(i32, i32)> = None; // (new_x, distance)
+        let mut best_y_snap: Option<(i32, i32)> = None; // (new_y, distance)
+
+        for (i, other) in self.monitors.iter().enumerate() {
+            if i == dragged_idx {
+                continue;
+            }
+
+            let other_rect = other.scaled_rect;
+            let other_right = other_rect.x + other_rect.width as i32;
+            let other_bottom = other_rect.y + other_rect.height as i32;
+
+            // X-axis edge snaps (for adjacency - touching edges)
+            let x_snaps = [
+                // Dragged left edge to other right edge (place right of other)
+                (other_right, (dragged.x - other_right).abs()),
+                // Dragged right edge to other left edge (place left of other)
+                (other_rect.x - dragged.width as i32, (dragged_right - other_rect.x).abs()),
+                // Dragged left edge to other left edge (align left edges)
+                (other_rect.x, (dragged.x - other_rect.x).abs()),
+                // Dragged right edge to other right edge (align right edges)
+                (other_right - dragged.width as i32, (dragged_right - other_right).abs()),
+            ];
+
+            for (new_x, dist) in x_snaps {
+                if dist < SNAP_THRESHOLD {
+                    if best_x_snap.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        best_x_snap = Some((new_x, dist));
+                    }
+                }
+            }
+
+            // Y-axis edge snaps
+            let y_snaps = [
+                // Dragged top edge to other bottom edge (place below other)
+                (other_bottom, (dragged.y - other_bottom).abs()),
+                // Dragged bottom edge to other top edge (place above other)
+                (other_rect.y - dragged.height as i32, (dragged_bottom - other_rect.y).abs()),
+                // Dragged top edge to other top edge (align top edges)
+                (other_rect.y, (dragged.y - other_rect.y).abs()),
+                // Dragged bottom edge to other bottom edge (align bottom edges)
+                (other_bottom - dragged.height as i32, (dragged_bottom - other_bottom).abs()),
+            ];
+
+            for (new_y, dist) in y_snaps {
+                if dist < SNAP_THRESHOLD {
+                    if best_y_snap.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        best_y_snap = Some((new_y, dist));
+                    }
+                }
+            }
+        }
+
+        // Apply snaps
+        if let Some((new_x, _)) = best_x_snap {
+            dragged.x = new_x;
+        }
+        if let Some((new_y, _)) = best_y_snap {
+            dragged.y = new_y;
+        }
+
+        // Check for overlap and resolve if needed
+        if self.would_overlap(dragged, dragged_idx) {
+            // Revert to original position if we'd overlap
+            return;
+        }
+
+        self.monitors[dragged_idx].scaled_rect = dragged;
     }
 
     /// Check if a rect overlaps with any monitor except the specified one.
@@ -402,84 +472,6 @@ impl MonitorView {
         let b_bottom = b.y + b.height as i32;
 
         a.x < b_right && a_right > b.x && a.y < b_bottom && a_bottom > b.y
-    }
-
-    /// Snap a monitor to be adjacent to the nearest other monitor.
-    /// Uses directional awareness - snaps to the side the monitor was dropped on.
-    /// Ensures no overlaps with other monitors.
-    fn snap_to_nearest(&mut self, dragged_idx: usize, dragged: Rect) {
-        let dragged_center_x = dragged.x + dragged.width as i32 / 2;
-        let dragged_center_y = dragged.y + dragged.height as i32 / 2;
-
-        let mut best_snap: Option<(i32, i32, i32)> = None; // (new_x, new_y, distance)
-
-        for (i, other) in self.monitors.iter().enumerate() {
-            if i == dragged_idx {
-                continue;
-            }
-
-            let other_rect = other.scaled_rect;
-            let other_center_x = other_rect.x + other_rect.width as i32 / 2;
-            let other_center_y = other_rect.y + other_rect.height as i32 / 2;
-
-            // Determine which side of the other monitor we're on
-            let dx = dragged_center_x - other_center_x;
-            let dy = dragged_center_y - other_center_y;
-
-            // Try all 4 sides and pick the best non-overlapping position
-            let candidates = [
-                // Right of other
-                (other_rect.x + other_rect.width as i32, other_rect.y),
-                // Left of other
-                (other_rect.x - dragged.width as i32, other_rect.y),
-                // Below other
-                (other_rect.x, other_rect.y + other_rect.height as i32),
-                // Above other
-                (other_rect.x, other_rect.y - dragged.height as i32),
-            ];
-
-            // Score each candidate based on direction preference
-            for (new_x, new_y) in candidates {
-                let candidate_rect = Rect::new(new_x, new_y, dragged.width, dragged.height);
-
-                // Skip if this position would overlap with another monitor
-                if self.would_overlap(candidate_rect, dragged_idx) {
-                    continue;
-                }
-
-                // Calculate distance with direction weighting
-                let new_center_x = new_x + dragged.width as i32 / 2;
-                let new_center_y = new_y + dragged.height as i32 / 2;
-
-                // Base distance
-                let mut dist = (dragged_center_x - new_center_x).abs()
-                    + (dragged_center_y - new_center_y).abs();
-
-                // Penalize positions that don't match the drag direction
-                let snap_dx = new_center_x - other_center_x;
-                let snap_dy = new_center_y - other_center_y;
-
-                // If we're dragging more horizontally, prefer horizontal snaps
-                if dx.abs() > dy.abs() {
-                    if (dx > 0) != (snap_dx > 0) {
-                        dist += 1000; // Penalize wrong horizontal direction
-                    }
-                } else {
-                    if (dy > 0) != (snap_dy > 0) {
-                        dist += 1000; // Penalize wrong vertical direction
-                    }
-                }
-
-                if best_snap.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                    best_snap = Some((new_x, new_y, dist));
-                }
-            }
-        }
-
-        if let Some((new_x, new_y, _)) = best_snap {
-            self.monitors[dragged_idx].scaled_rect.x = new_x;
-            self.monitors[dragged_idx].scaled_rect.y = new_y;
-        }
     }
 
     /// Render the monitor view.
@@ -645,9 +637,13 @@ impl MonitorView {
     }
 
     /// Check if layout has been modified.
-    #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Clear the dirty flag (after save).
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 
     /// Get primary monitor name.

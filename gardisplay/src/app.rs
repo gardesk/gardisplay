@@ -466,7 +466,10 @@ impl App {
             .insert("default".to_string(), profile);
 
         match self.config.save() {
-            Ok(()) => self.set_status("Saved profile"),
+            Ok(()) => {
+                self.monitor_view.clear_dirty();
+                self.set_status("Saved profile");
+            }
             Err(e) => {
                 tracing::error!("failed to save profile: {}", e);
                 self.set_status("Failed to save profile");
