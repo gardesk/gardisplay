@@ -1,14 +1,16 @@
 //! Main application state and event loop.
 
 use anyhow::Result;
-use gartk_core::{InputEvent, Key, Rect, Size, Theme};
+use gartk_core::{Color, InputEvent, Key, Rect, Size, Theme};
 use gartk_render::{copy_surface_to_window, Renderer};
 use gartk_x11::{
-    detect_monitors, primary_monitor, Connection, EventLoop, EventLoopConfig, Window, WindowConfig,
+    detect_monitors, primary_monitor, Connection, EventLoop, EventLoopConfig, Monitor, Window,
+    WindowConfig,
 };
 use x11rb::protocol::xproto::ConnectionExt;
 
-use crate::config::Config;
+use crate::config::{Config, MonitorConfig};
+use crate::randr::RandrManager;
 use crate::ui::{EventResult, MonitorView};
 
 /// Window dimensions.
@@ -17,15 +19,19 @@ const WINDOW_HEIGHT: u32 = 600;
 
 /// Main application.
 pub struct App {
-    #[allow(dead_code)] // Used in Sprint 3 for RandR operations
+    #[allow(dead_code)] // Connection kept alive for X11 resources
     conn: Connection,
     window: Window,
     renderer: Renderer,
     theme: Theme,
     gc: u32,
-    #[allow(dead_code)] // Used in Sprint 3 for profile management
+    #[allow(dead_code)] // Used for profile management
     config: Config,
     monitor_view: MonitorView,
+    randr: Option<RandrManager>,
+    original_monitors: Vec<Monitor>,
+    demo_mode: bool,
+    status_message: Option<(String, std::time::Instant)>,
 }
 
 impl App {
@@ -82,6 +88,19 @@ impl App {
         let view_rect = Rect::new(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT - 100); // Leave room for controls
         let mut monitor_view = MonitorView::new(view_rect);
 
+        // Create RandR manager (only in non-demo mode)
+        let randr = if demo {
+            None
+        } else {
+            match RandrManager::new(conn.clone()) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("failed to create RandR manager: {}", e);
+                    None
+                }
+            }
+        };
+
         // Detect or create demo monitors
         let monitors = if demo {
             tracing::info!("demo mode: using fake monitors");
@@ -101,6 +120,9 @@ impl App {
                 if m.primary { "(primary)" } else { "" }
             );
         }
+
+        // Store original state for reverting
+        let original_monitors = monitors.clone();
         monitor_view.set_monitors(monitors);
 
         Ok(Self {
@@ -111,6 +133,10 @@ impl App {
             gc,
             config,
             monitor_view,
+            randr,
+            original_monitors,
+            demo_mode: demo,
+            status_message: None,
         })
     }
 
@@ -178,6 +204,24 @@ impl App {
             InputEvent::CloseRequested => EventResult::Quit,
             InputEvent::Key(e) if e.pressed && e.key == Key::Escape => EventResult::Quit,
             InputEvent::Key(e) if e.pressed && e.key == Key::Char('q') => EventResult::Quit,
+            // Apply: Ctrl+A or Enter
+            InputEvent::Key(e)
+                if e.pressed
+                    && (e.key == Key::Return
+                        || (e.modifiers.ctrl && e.key == Key::Char('a'))) =>
+            {
+                self.apply_layout();
+                EventResult::Redraw
+            }
+            // Revert: Ctrl+R or Backspace
+            InputEvent::Key(e)
+                if e.pressed
+                    && (e.key == Key::Backspace
+                        || (e.modifiers.ctrl && e.key == Key::Char('r'))) =>
+            {
+                self.revert_layout();
+                EventResult::Redraw
+            }
             InputEvent::Resize { width, height } => {
                 self.handle_resize(Size::new(*width, *height));
                 EventResult::Redraw
@@ -185,6 +229,140 @@ impl App {
             InputEvent::Expose => EventResult::Redraw,
             _ => self.monitor_view.handle_event(event),
         }
+    }
+
+    /// Apply the current layout via RandR.
+    fn apply_layout(&mut self) {
+        if self.demo_mode {
+            self.set_status("Demo mode - changes not applied");
+            return;
+        }
+
+        let Some(ref randr) = self.randr else {
+            self.set_status("RandR not available");
+            return;
+        };
+
+        // Build MonitorConfig from current view state
+        // Collect all data we need before releasing the borrow
+        let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
+        let configs: Vec<(MonitorConfig, Monitor)> = self
+            .monitor_view
+            .monitors()
+            .iter()
+            .map(|state| {
+                let config = MonitorConfig {
+                    name: state.info.name.clone(),
+                    enabled: true,
+                    x: state.real_position.x,
+                    y: state.real_position.y,
+                    width: state.info.rect.width,
+                    height: state.info.rect.height,
+                    refresh: 60.0, // TODO: get actual refresh rate
+                    scale: 1.0,
+                    rotation: 0,
+                };
+                let monitor = Monitor {
+                    name: state.info.name.clone(),
+                    rect: Rect::new(
+                        state.real_position.x,
+                        state.real_position.y,
+                        state.info.rect.width,
+                        state.info.rect.height,
+                    ),
+                    primary: primary_name.as_ref() == Some(&state.info.name),
+                    width_mm: state.info.width_mm,
+                    height_mm: state.info.height_mm,
+                };
+                (config, monitor)
+            })
+            .collect();
+
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        for (config, _) in &configs {
+            match randr.apply_monitor(config) {
+                Ok(()) => success_count += 1,
+                Err(e) => {
+                    tracing::error!("failed to apply config for {}: {}", config.name, e);
+                    error_count += 1;
+                }
+            }
+        }
+
+        // Set primary
+        if let Some(ref name) = primary_name {
+            if let Err(e) = randr.set_primary(name) {
+                tracing::error!("failed to set primary: {}", e);
+            }
+        }
+
+        if let Err(e) = randr.flush() {
+            tracing::error!("failed to flush: {}", e);
+        }
+
+        if error_count == 0 {
+            self.set_status(&format!("Applied {} monitor(s)", success_count));
+            // Update original state after successful apply
+            self.original_monitors = configs.into_iter().map(|(_, m)| m).collect();
+        } else {
+            self.set_status(&format!(
+                "Applied {} monitor(s), {} error(s)",
+                success_count, error_count
+            ));
+        }
+    }
+
+    /// Revert to the original layout.
+    fn revert_layout(&mut self) {
+        if self.demo_mode {
+            // In demo mode, just reset the view
+            self.monitor_view.set_monitors(self.original_monitors.clone());
+            self.set_status("Reverted to original layout");
+            return;
+        }
+
+        // Restore original monitors in view
+        self.monitor_view.set_monitors(self.original_monitors.clone());
+
+        // Apply via RandR
+        if let Some(ref randr) = self.randr {
+            for m in &self.original_monitors {
+                let config = MonitorConfig {
+                    name: m.name.clone(),
+                    enabled: true,
+                    x: m.rect.x,
+                    y: m.rect.y,
+                    width: m.rect.width,
+                    height: m.rect.height,
+                    refresh: 60.0,
+                    scale: 1.0,
+                    rotation: 0,
+                };
+
+                if let Err(e) = randr.apply_monitor(&config) {
+                    tracing::error!("failed to revert {}: {}", m.name, e);
+                }
+            }
+
+            // Restore primary
+            if let Some(m) = self.original_monitors.iter().find(|m| m.primary) {
+                if let Err(e) = randr.set_primary(&m.name) {
+                    tracing::error!("failed to restore primary: {}", e);
+                }
+            }
+
+            let _ = randr.flush();
+        }
+
+        self.set_status("Reverted to original layout");
+    }
+
+    /// Set a status message to display temporarily.
+    fn set_status(&mut self, message: &str) {
+        tracing::info!("{}", message);
+        self.status_message = Some((message.to_string(), std::time::Instant::now()));
     }
 
     /// Handle window resize.
@@ -227,13 +405,45 @@ impl App {
             1.0,
         )?;
 
-        // Title in controls area
+        // Instructions
         self.renderer.text_default(
-            "gardisplay - Drag monitors to arrange",
+            "Drag monitors to arrange | Double-click to set primary",
             10.0,
             (controls_y + 20) as f64,
             self.theme.foreground,
         )?;
+
+        // Keyboard shortcuts
+        self.renderer.text_default(
+            "Enter: Apply | Backspace: Revert | Q/Esc: Quit",
+            10.0,
+            (controls_y + 40) as f64,
+            self.theme.item_description,
+        )?;
+
+        // Status message (show for 3 seconds)
+        if let Some((ref msg, instant)) = self.status_message {
+            if instant.elapsed().as_secs() < 3 {
+                // Green for success, theme color otherwise
+                let color = if msg.contains("error") {
+                    Color::new(1.0, 0.4, 0.4, 1.0) // Red
+                } else {
+                    Color::new(0.4, 0.8, 0.4, 1.0) // Green
+                };
+                self.renderer
+                    .text_default(msg, 10.0, (controls_y + 70) as f64, color)?;
+            }
+        }
+
+        // Dirty indicator
+        if self.monitor_view.is_dirty() {
+            self.renderer.text_default(
+                "(unsaved changes)",
+                (size.width - 150) as f64,
+                (controls_y + 20) as f64,
+                Color::new(1.0, 0.7, 0.3, 1.0), // Orange
+            )?;
+        }
 
         // Blit to window
         copy_surface_to_window(self.renderer.surface_mut(), &self.window, self.gc, 0, 0)?;

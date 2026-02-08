@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod randr;
 mod ui;
 
 use clap::Parser;
