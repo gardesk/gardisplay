@@ -487,6 +487,7 @@ impl MonitorView {
     }
 
     /// Find the nearest position that makes the rect adjacent to another monitor.
+    /// Clamps perpendicular coordinate to ensure overlap (adjacency).
     fn find_nearest_adjacent_position(&self, dragged_idx: usize, dragged: Rect) -> Option<Rect> {
         let mut best: Option<(Rect, i32)> = None;
 
@@ -499,27 +500,39 @@ impl MonitorView {
             let r_right = r.x + r.width as i32;
             let r_bottom = r.y + r.height as i32;
 
-            // Try 4 adjacent positions, preserving the perpendicular coordinate
+            // For horizontal adjacency, clamp y to ensure vertical overlap
+            // Valid y range: (r.y - dragged.height + 1) to (r_bottom - 1)
+            let clamped_y = dragged.y.clamp(
+                r.y - dragged.height as i32 + 1,
+                r_bottom - 1,
+            );
+
+            // For vertical adjacency, clamp x to ensure horizontal overlap
+            // Valid x range: (r.x - dragged.width + 1) to (r_right - 1)
+            let clamped_x = dragged.x.clamp(
+                r.x - dragged.width as i32 + 1,
+                r_right - 1,
+            );
+
+            // Try 4 adjacent positions with clamped perpendicular coordinates
             let candidates = [
-                // Right of other (preserve y)
-                Rect::new(r_right, dragged.y, dragged.width, dragged.height),
-                // Left of other (preserve y)
-                Rect::new(r.x - dragged.width as i32, dragged.y, dragged.width, dragged.height),
-                // Below other (preserve x)
-                Rect::new(dragged.x, r_bottom, dragged.width, dragged.height),
-                // Above other (preserve x)
-                Rect::new(dragged.x, r.y - dragged.height as i32, dragged.width, dragged.height),
+                // Right of other (clamped y for vertical overlap)
+                Rect::new(r_right, clamped_y, dragged.width, dragged.height),
+                // Left of other (clamped y for vertical overlap)
+                Rect::new(r.x - dragged.width as i32, clamped_y, dragged.width, dragged.height),
+                // Below other (clamped x for horizontal overlap)
+                Rect::new(clamped_x, r_bottom, dragged.width, dragged.height),
+                // Above other (clamped x for horizontal overlap)
+                Rect::new(clamped_x, r.y - dragged.height as i32, dragged.width, dragged.height),
             ];
 
             for candidate in candidates {
-                // Must be adjacent and not overlap
-                if !Self::rects_adjacent(candidate, r) {
-                    continue;
-                }
+                // Skip if would overlap with another monitor
                 if self.would_overlap(candidate, dragged_idx) {
                     continue;
                 }
 
+                // Calculate distance from original drop position
                 let dist = (candidate.x - dragged.x).abs() + (candidate.y - dragged.y).abs();
                 if best.map_or(true, |(_, d)| dist < d) {
                     best = Some((candidate, dist));
