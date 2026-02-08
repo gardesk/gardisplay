@@ -17,11 +17,13 @@ const WINDOW_HEIGHT: u32 = 600;
 
 /// Main application.
 pub struct App {
+    #[allow(dead_code)] // Used in Sprint 3 for RandR operations
     conn: Connection,
     window: Window,
     renderer: Renderer,
     theme: Theme,
     gc: u32,
+    #[allow(dead_code)] // Used in Sprint 3 for profile management
     config: Config,
     monitor_view: MonitorView,
 }

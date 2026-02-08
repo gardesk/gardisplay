@@ -618,21 +618,25 @@ impl MonitorView {
     }
 
     /// Get the selected monitor index.
+    #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
 
     /// Get monitors.
+    #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn monitors(&self) -> &[MonitorState] {
         &self.monitors
     }
 
     /// Check if layout has been modified.
+    #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
     /// Get primary monitor name.
+    #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn primary_name(&self) -> Option<&str> {
         self.primary_name.as_deref()
     }

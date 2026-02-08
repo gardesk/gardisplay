@@ -33,6 +33,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 
 impl Config {
     /// Save configuration to file.
+    #[allow(dead_code)] // Used in Sprint 3 for profile management
     pub fn save(&self) -> anyhow::Result<()> {
         let path = config_path()?;
 
