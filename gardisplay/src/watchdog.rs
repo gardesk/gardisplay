@@ -111,22 +111,24 @@ fn generate_xrandr_commands(configs: &[MonitorConfig]) -> String {
             _ => "normal",
         };
 
-        // Include scale if not 1.0
-        let scale_arg = if (config.scale - 1.0).abs() > 0.001 {
-            format!(" --scale {}x{}", config.scale, config.scale)
+        // Always include scale to reset any transforms
+        // scale 1x1 resets to identity transform
+        let scale = if (config.scale - 1.0).abs() > 0.001 {
+            config.scale
         } else {
-            String::new()
+            1.0
         };
 
         commands.push(format!(
-            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {}{}",
+            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {} --scale {}x{}",
             config.name,
             config.width,
             config.height,
             config.x,
             config.y,
             rotation,
-            scale_arg
+            scale,
+            scale
         ));
     }
 

@@ -244,16 +244,48 @@ impl App {
             .map(|m| (m.name.as_str(), m))
             .collect();
 
+        // Check if the profile's monitor set matches the current monitors
+        let current_monitors: Vec<&str> = view.monitors().iter().map(|s| s.info.name.as_str()).collect();
+        let profile_monitors: Vec<&str> = profile.monitors.iter().map(|m| m.name.as_str()).collect();
+
+        let monitors_match = current_monitors.len() == profile_monitors.len()
+            && current_monitors.iter().all(|m| profile_monitors.contains(m));
+
+        if !monitors_match {
+            tracing::warn!(
+                "profile monitors {:?} don't match current monitors {:?}, skipping position loading",
+                profile_monitors,
+                current_monitors
+            );
+            // Still set primary if specified
+            if let Some(ref primary) = profile.primary {
+                view.set_primary(primary);
+            }
+            view.recalculate_layout();
+            return;
+        }
+
         // Update monitor positions from profile
         for state in view.monitors_mut() {
             if let Some(config) = config_map.get(state.info.name.as_str()) {
-                state.real_position = gartk_core::Point::new(config.x, config.y);
-                tracing::debug!(
-                    "loaded {} at ({}, {})",
-                    state.info.name,
-                    config.x,
-                    config.y
-                );
+                // Sanity check: don't apply positions that are clearly wrong
+                // (negative positions or positions way outside screen bounds)
+                if config.x >= 0 && config.y >= 0 && config.x < 10000 && config.y < 10000 {
+                    state.real_position = gartk_core::Point::new(config.x, config.y);
+                    tracing::debug!(
+                        "loaded {} at ({}, {})",
+                        state.info.name,
+                        config.x,
+                        config.y
+                    );
+                } else {
+                    tracing::warn!(
+                        "ignoring invalid position ({}, {}) for {}",
+                        config.x,
+                        config.y,
+                        state.info.name
+                    );
+                }
             }
         }
 
