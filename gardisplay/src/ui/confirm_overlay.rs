@@ -112,8 +112,14 @@ impl ConfirmOverlay {
 
     /// Handle an input event.
     pub fn handle_event(&mut self, event: &InputEvent) -> ConfirmResult {
-        // Check for timeout on any event
+        // ALWAYS check for timeout first, on EVERY event
+        // This is critical for auto-revert to work reliably
         if self.is_expired() {
+            tracing::info!(
+                "confirm overlay expired after {:?} (timeout was {:?})",
+                self.start_time.elapsed(),
+                self.timeout
+            );
             return ConfirmResult::Reverted;
         }
 
@@ -121,9 +127,15 @@ impl ConfirmOverlay {
             InputEvent::Key(e) if e.pressed => {
                 match e.key {
                     // Enter confirms
-                    Key::Return => ConfirmResult::Confirmed,
+                    Key::Return => {
+                        tracing::info!("user confirmed display changes via Enter key");
+                        ConfirmResult::Confirmed
+                    }
                     // Escape reverts
-                    Key::Escape => ConfirmResult::Reverted,
+                    Key::Escape => {
+                        tracing::info!("user reverted display changes via Escape key");
+                        ConfirmResult::Reverted
+                    }
                     _ => ConfirmResult::None,
                 }
             }
@@ -142,20 +154,22 @@ impl ConfirmOverlay {
             }
             InputEvent::MousePress(e) if e.button == Some(MouseButton::Left) => {
                 if self.keep_btn.contains_point(e.position) {
+                    tracing::info!("user confirmed display changes via Keep button");
                     ConfirmResult::Confirmed
                 } else if self.revert_btn.contains_point(e.position) {
+                    tracing::info!("user reverted display changes via Revert button");
                     ConfirmResult::Reverted
                 } else {
                     ConfirmResult::None
                 }
             }
             InputEvent::Idle => {
-                // Check timeout on idle
-                if self.is_expired() {
-                    ConfirmResult::Reverted
-                } else {
-                    ConfirmResult::Redraw // Update countdown display
+                // Check timeout on idle (already checked above, but log for debugging)
+                let remaining = self.remaining_secs();
+                if remaining <= 3 {
+                    tracing::debug!("confirm overlay: {}s remaining", remaining);
                 }
+                ConfirmResult::Redraw // Update countdown display
             }
             _ => ConfirmResult::None,
         }

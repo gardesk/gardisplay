@@ -40,6 +40,12 @@ impl RandrManager {
     #[allow(dead_code)] // Used for mode selection UI
     pub fn get_outputs(&self) -> Result<Vec<OutputInfo>> {
         let resources = self.get_resources()?;
+        tracing::debug!(
+            "get_outputs: resources has {} modes available, {} outputs",
+            resources.modes.len(),
+            resources.outputs.len()
+        );
+
         let mut outputs = Vec::new();
 
         for &output in &resources.outputs {
@@ -52,12 +58,26 @@ impl RandrManager {
             let name = String::from_utf8_lossy(&info.name).to_string();
             let connected = info.connection == randr::Connection::CONNECTED;
 
+            tracing::debug!(
+                "  output '{}': {} mode IDs in info.modes",
+                name,
+                info.modes.len()
+            );
+
             // Get available modes
             let modes: Vec<ModeInfo> = info
                 .modes
                 .iter()
-                .filter_map(|&mode_id| self.get_mode_info(&resources, mode_id))
+                .filter_map(|&mode_id| {
+                    let result = self.get_mode_info(&resources, mode_id);
+                    if result.is_none() {
+                        tracing::debug!("    mode_id {} not found in resources.modes", mode_id);
+                    }
+                    result
+                })
                 .collect();
+
+            tracing::debug!("    resolved {} modes for '{}'", modes.len(), name);
 
             // Get current mode and position if CRTC is set
             let (crtc, current_mode, position) = if info.crtc != 0 {
@@ -167,6 +187,156 @@ impl RandrManager {
         Err(RandrError::OutputNotFound(name.to_string()))
     }
 
+    /// Ensure the virtual screen is large enough to contain the given bounds.
+    /// This must be called before applying configurations that might exceed the current screen size.
+    pub fn ensure_screen_size(&self, required_width: u32, required_height: u32) -> Result<()> {
+        let _resources = self.get_resources()?;
+
+        // Get current screen info
+        let screen_info = self
+            .conn
+            .inner()
+            .randr_get_screen_info(self.root)?
+            .reply()?;
+
+        let current_size = screen_info
+            .sizes
+            .get(screen_info.size_id as usize)
+            .map(|s| (s.width as u32, s.height as u32))
+            .unwrap_or((0, 0));
+
+        tracing::debug!(
+            "ensure_screen_size: current={}x{}, required={}x{}",
+            current_size.0,
+            current_size.1,
+            required_width,
+            required_height
+        );
+
+        // Only resize if needed
+        if current_size.0 >= required_width && current_size.1 >= required_height {
+            return Ok(());
+        }
+
+        let new_width = required_width.max(current_size.0);
+        let new_height = required_height.max(current_size.1);
+
+        // Calculate physical size in mm (approximate based on 96 DPI)
+        let mm_width = (new_width as f64 * 25.4 / 96.0) as u32;
+        let mm_height = (new_height as f64 * 25.4 / 96.0) as u32;
+
+        tracing::info!(
+            "resizing virtual screen to {}x{} ({}x{}mm)",
+            new_width,
+            new_height,
+            mm_width,
+            mm_height
+        );
+
+        self.conn.inner().randr_set_screen_size(
+            self.root,
+            new_width as u16,
+            new_height as u16,
+            mm_width,
+            mm_height,
+        )?;
+
+        self.conn.inner().flush()?;
+        Ok(())
+    }
+
+    /// Calculate the effective dimensions after rotation.
+    fn rotated_dimensions(width: u32, height: u32, rotation: u32) -> (u32, u32) {
+        match rotation {
+            90 | 270 => (height, width), // Swap dimensions for 90/270 rotation
+            _ => (width, height),        // 0 or 180 keeps same dimensions
+        }
+    }
+
+    /// Calculate the required screen size to contain all given monitor configurations.
+    pub fn calculate_required_screen_size(configs: &[MonitorConfig]) -> (u32, u32) {
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+
+        for config in configs {
+            if !config.enabled {
+                continue;
+            }
+
+            let (eff_width, eff_height) =
+                Self::rotated_dimensions(config.width, config.height, config.rotation);
+
+            let right = config.x.max(0) as u32 + eff_width;
+            let bottom = config.y.max(0) as u32 + eff_height;
+
+            max_x = max_x.max(right);
+            max_y = max_y.max(bottom);
+        }
+
+        // Ensure minimum screen size
+        (max_x.max(320), max_y.max(200))
+    }
+
+    /// Prepare the screen for a set of monitor configurations.
+    /// This should be called before applying any configurations to ensure the screen is large enough.
+    pub fn prepare_screen_for_configs(&self, configs: &[MonitorConfig]) -> Result<()> {
+        let (required_width, required_height) = Self::calculate_required_screen_size(configs);
+        tracing::info!(
+            "preparing screen for {} monitors: required size {}x{}",
+            configs.iter().filter(|c| c.enabled).count(),
+            required_width,
+            required_height
+        );
+        self.ensure_screen_size(required_width, required_height)
+    }
+
+    /// Shrink the screen to the minimum size required for the current outputs.
+    /// Call this after applying all configurations to clean up excess virtual screen space.
+    pub fn shrink_screen_to_fit(&self) -> Result<()> {
+        let outputs = self.get_outputs()?;
+
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+
+        for output in &outputs {
+            if !output.connected {
+                continue;
+            }
+            if let (Some(mode), Some(pos)) = (&output.current_mode, output.position) {
+                let right = pos.0.max(0) as u32 + mode.width as u32;
+                let bottom = pos.1.max(0) as u32 + mode.height as u32;
+                max_x = max_x.max(right);
+                max_y = max_y.max(bottom);
+            }
+        }
+
+        // Ensure minimum size
+        let target_width = max_x.max(320);
+        let target_height = max_y.max(200);
+
+        let mm_width = (target_width as f64 * 25.4 / 96.0) as u32;
+        let mm_height = (target_height as f64 * 25.4 / 96.0) as u32;
+
+        tracing::info!(
+            "shrinking virtual screen to {}x{} ({}x{}mm)",
+            target_width,
+            target_height,
+            mm_width,
+            mm_height
+        );
+
+        self.conn.inner().randr_set_screen_size(
+            self.root,
+            target_width as u16,
+            target_height as u16,
+            mm_width,
+            mm_height,
+        )?;
+
+        self.conn.inner().flush()?;
+        Ok(())
+    }
+
     /// Apply a monitor configuration.
     pub fn apply_monitor(&self, config: &MonitorConfig) -> Result<()> {
         if !config.enabled {
@@ -187,6 +357,32 @@ impl RandrManager {
 
         // Find available CRTC
         let crtc = self.find_available_crtc(&resources, &output_info, output)?;
+
+        // Calculate effective dimensions after rotation
+        let (eff_width, eff_height) =
+            Self::rotated_dimensions(config.width, config.height, config.rotation);
+
+        // Calculate required screen size to contain this monitor
+        let required_width = config.x as u32 + eff_width;
+        let required_height = config.y as u32 + eff_height;
+
+        tracing::debug!(
+            "apply_monitor {}: {}x{} rot={} -> effective {}x{} at ({}, {})",
+            config.name,
+            config.width,
+            config.height,
+            config.rotation,
+            eff_width,
+            eff_height,
+            config.x,
+            config.y
+        );
+
+        // Ensure screen is large enough BEFORE applying the CRTC config
+        self.ensure_screen_size(required_width, required_height)?;
+
+        // Re-fetch resources after screen resize (timestamps may have changed)
+        let resources = self.get_resources()?;
 
         // Convert rotation
         let rotation = match config.rotation {
@@ -220,10 +416,11 @@ impl RandrManager {
         }
 
         tracing::info!(
-            "applied config for {}: {}x{} at ({}, {})",
+            "applied config for {}: {}x{} rot={} at ({}, {})",
             config.name,
             config.width,
             config.height,
+            config.rotation,
             config.x,
             config.y
         );

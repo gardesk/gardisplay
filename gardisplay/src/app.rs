@@ -552,8 +552,39 @@ impl App {
         }
     }
 
+    /// Refresh RandR outputs from the display server.
+    fn refresh_randr_outputs(&mut self) {
+        if self.demo_mode {
+            return; // Demo mode uses static outputs
+        }
+
+        if let Some(ref randr) = self.randr {
+            match randr.get_outputs() {
+                Ok(outputs) => {
+                    tracing::debug!("refresh_randr_outputs: found {} outputs", outputs.len());
+                    for o in &outputs {
+                        tracing::debug!(
+                            "  {} connected={} modes={} current={:?}",
+                            o.name,
+                            o.connected,
+                            o.modes.len(),
+                            o.current_mode.as_ref().map(|m| format!("{}x{}@{:.0}Hz", m.width, m.height, m.refresh))
+                        );
+                    }
+                    self.randr_outputs = outputs;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to refresh RandR outputs: {}", e);
+                }
+            }
+        }
+    }
+
     /// Sync the display panel with the selected monitor.
     fn sync_panel_selection(&mut self) {
+        // Refresh outputs to get current mode information
+        self.refresh_randr_outputs();
+
         if let Some(state) = self.monitor_view.selected_monitor() {
             // Find matching RandR output (may be None in demo mode)
             let output = self.randr_outputs.iter().find(|o| o.name == state.info.name);
@@ -642,6 +673,14 @@ impl App {
             })
             .collect();
 
+        // IMPORTANT: Prepare the screen size BEFORE applying any configurations
+        // This is essential for rotation changes which may require a larger virtual screen
+        if let Err(e) = randr.prepare_screen_for_configs(&configs) {
+            tracing::error!("failed to prepare screen size: {}", e);
+            self.set_status(&format!("Failed to prepare screen: {}", e));
+            return;
+        }
+
         let mut success_count = 0;
         let mut error_count = 0;
 
@@ -664,6 +703,11 @@ impl App {
 
         if let Err(e) = randr.flush() {
             tracing::error!("failed to flush: {}", e);
+        }
+
+        // Try to shrink screen to fit (non-fatal if it fails)
+        if let Err(e) = randr.shrink_screen_to_fit() {
+            tracing::debug!("shrink_screen_to_fit failed (non-fatal): {}", e);
         }
 
         if error_count > 0 {
@@ -718,12 +762,24 @@ impl App {
 
         if let Some(ref configs) = self.pre_change_config.take() {
             if let Some(ref randr) = self.randr {
+                // IMPORTANT: Prepare screen size BEFORE reverting
+                // The pre-change config may have different dimensions than current
+                if let Err(e) = randr.prepare_screen_for_configs(configs) {
+                    tracing::error!("failed to prepare screen for revert: {}", e);
+                    // Continue anyway - we still want to try to revert
+                }
+
                 for config in configs {
                     if let Err(e) = randr.apply_monitor(config) {
                         tracing::error!("failed to revert {}: {}", config.name, e);
                     }
                 }
                 let _ = randr.flush();
+
+                // Try to shrink screen to fit
+                if let Err(e) = randr.shrink_screen_to_fit() {
+                    tracing::debug!("shrink_screen_to_fit failed during revert: {}", e);
+                }
             }
         }
 
