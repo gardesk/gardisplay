@@ -1,10 +1,12 @@
 //! UI components for gardisplay.
 
+mod display_panel;
 mod monitor_view;
 pub mod widgets;
 
+pub use display_panel::{DisplayPanel, DisplayPanelConfig, DisplayPanelResult};
 pub use monitor_view::MonitorView;
-pub use widgets::{Button, Dropdown, DropdownAction, TextInput};
+pub use widgets::{Button, Dropdown, DropdownAction, TextInput, Toggle};
 
 /// Result of handling an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

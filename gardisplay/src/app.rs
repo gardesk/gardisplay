@@ -4,18 +4,24 @@ use anyhow::Result;
 use gartk_core::{Color, InputEvent, Key, Rect, Size, Theme};
 use gartk_render::{copy_surface_to_window, Renderer};
 use gartk_x11::{
-    detect_monitors, primary_monitor, Connection, EventLoop, EventLoopConfig, Monitor, Window,
-    WindowConfig,
+    detect_monitors, primary_monitor, Connection, CursorManager, CursorShape, EventLoop,
+    EventLoopConfig, Monitor, Window, WindowConfig,
 };
 use x11rb::protocol::xproto::ConnectionExt;
 
 use crate::config::{Config, MonitorConfig, Profile};
-use crate::randr::RandrManager;
-use crate::ui::{Button, Dropdown, DropdownAction, EventResult, MonitorView, TextInput};
+use crate::randr::{OutputInfo, RandrManager};
+use crate::ui::{
+    Button, DisplayPanel, DisplayPanelResult, Dropdown, DropdownAction, EventResult, MonitorView,
+    TextInput,
+};
 
 /// Window dimensions.
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
+
+/// Footer height in pixels.
+const FOOTER_HEIGHT: u32 = 100;
 
 /// Main application.
 pub struct App {
@@ -31,6 +37,13 @@ pub struct App {
     original_monitors: Vec<Monitor>,
     demo_mode: bool,
     status_message: Option<(String, std::time::Instant)>,
+    // Display panel
+    display_panel: DisplayPanel,
+    randr_outputs: Vec<OutputInfo>,
+    last_selected: Option<usize>,
+    // Cursor management
+    cursor_manager: CursorManager,
+    current_cursor: CursorShape,
     // UI widgets
     current_profile: String,
     dropdown_profiles: Dropdown,
@@ -91,19 +104,34 @@ impl App {
         let theme = Theme::dark();
         let renderer = Renderer::with_theme(WINDOW_WIDTH, WINDOW_HEIGHT, theme.clone())?;
 
-        // Create monitor view
-        let view_rect = Rect::new(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT - 100); // Leave room for controls
+        // Create cursor manager
+        let cursor_manager = CursorManager::new(conn.clone())?;
+
+        // Calculate layout: monitor view (2/3) + display panel (1/3) + footer
+        let view_area = WINDOW_HEIGHT - FOOTER_HEIGHT;
+        let panel_height = view_area / 3;
+        let monitor_view_height = view_area - panel_height;
+
+        // Create monitor view (top 2/3)
+        let view_rect = Rect::new(0, 0, WINDOW_WIDTH, monitor_view_height);
         let mut monitor_view = MonitorView::new(view_rect);
 
+        // Create display panel (bottom 1/3 of view area)
+        let panel_rect = Rect::new(0, monitor_view_height as i32, WINDOW_WIDTH, panel_height);
+        let display_panel = DisplayPanel::new(panel_rect);
+
         // Create RandR manager (only in non-demo mode)
-        let randr = if demo {
-            None
+        let (randr, randr_outputs) = if demo {
+            (None, Vec::new())
         } else {
             match RandrManager::new(conn.clone()) {
-                Ok(r) => Some(r),
+                Ok(r) => {
+                    let outputs = r.get_outputs().unwrap_or_default();
+                    (Some(r), outputs)
+                }
                 Err(e) => {
                     tracing::warn!("failed to create RandR manager: {}", e);
-                    None
+                    (None, Vec::new())
                 }
             }
         };
@@ -139,7 +167,7 @@ impl App {
         }
 
         // Create UI widgets (positioned in controls area)
-        let controls_y = (WINDOW_HEIGHT - 100) as i32;
+        let controls_y = (WINDOW_HEIGHT - FOOTER_HEIGHT) as i32;
 
         // Buttons on the left
         let btn_apply = Button::new(10, controls_y + 60, 70, 32, "Apply");
@@ -170,6 +198,11 @@ impl App {
             original_monitors,
             demo_mode: demo,
             status_message: None,
+            display_panel,
+            randr_outputs,
+            last_selected: None,
+            cursor_manager,
+            current_cursor: CursorShape::Default,
             current_profile,
             dropdown_profiles,
             btn_apply,
@@ -334,12 +367,32 @@ impl App {
         if self.btn_save_as.handle_event(event) {
             // Show save-as input (appears above the dropdown)
             let size = self.renderer.size();
-            let controls_y = size.height.saturating_sub(100) as i32;
+            let controls_y = size.height.saturating_sub(FOOTER_HEIGHT) as i32;
             let mut input = TextInput::new(size.width as i32 - 260, controls_y + 25, 150, 32);
             input.set_placeholder("Profile name");
             input.set_active(true);
             self.save_as_input = Some(input);
             return EventResult::Redraw;
+        }
+
+        // Handle display panel events
+        match self.display_panel.handle_event(event) {
+            DisplayPanelResult::ConfigChanged(config) => {
+                if let Some(name) = self.display_panel.selected_output() {
+                    self.monitor_view.update_monitor_config(
+                        name,
+                        config.width,
+                        config.height,
+                        config.refresh,
+                        config.rotation,
+                        config.scale,
+                        config.enabled,
+                    );
+                }
+                return EventResult::Redraw;
+            }
+            DisplayPanelResult::Redraw => return EventResult::Redraw,
+            DisplayPanelResult::None => {}
         }
 
         match event {
@@ -374,7 +427,50 @@ impl App {
                 EventResult::Redraw
             }
             InputEvent::Expose => EventResult::Redraw,
-            _ => self.monitor_view.handle_event(event),
+            _ => {
+                let result = self.monitor_view.handle_event(event);
+                // Check if selection changed and sync with display panel
+                let current_selected = self.monitor_view.selected();
+                if current_selected != self.last_selected {
+                    self.last_selected = current_selected;
+                    self.sync_panel_selection();
+                }
+                // Update cursor based on hover/drag state
+                self.update_cursor();
+                result
+            }
+        }
+    }
+
+    /// Update the cursor based on monitor view state.
+    fn update_cursor(&mut self) {
+        let shape = self.monitor_view.cursor_shape();
+        if shape != self.current_cursor {
+            self.current_cursor = shape;
+            if let Err(e) = self.cursor_manager.set_window_cursor(self.window.id(), shape) {
+                tracing::debug!("failed to set cursor: {}", e);
+            }
+        }
+    }
+
+    /// Sync the display panel with the selected monitor.
+    fn sync_panel_selection(&mut self) {
+        if let Some(state) = self.monitor_view.selected_monitor() {
+            // Find matching RandR output
+            let output = self.randr_outputs.iter().find(|o| o.name == state.info.name);
+
+            self.display_panel.set_selected_monitor(
+                output,
+                state.info.rect.width,
+                state.info.rect.height,
+                state.refresh,
+                state.rotation,
+                state.scale,
+                state.enabled,
+            );
+        } else {
+            self.display_panel
+                .set_selected_monitor(None, 0, 0, 60.0, 0, 1.0, true);
         }
     }
 
@@ -687,12 +783,21 @@ impl App {
             return;
         }
 
-        // Update monitor view rect
-        let view_rect = Rect::new(0, 0, size.width, size.height.saturating_sub(100));
+        // Calculate new layout
+        let view_area = size.height.saturating_sub(FOOTER_HEIGHT);
+        let panel_height = view_area / 3;
+        let monitor_view_height = view_area - panel_height;
+
+        // Update monitor view rect (top 2/3)
+        let view_rect = Rect::new(0, 0, size.width, monitor_view_height);
         self.monitor_view.set_view_rect(view_rect);
 
-        // Reposition widgets
-        let controls_y = size.height.saturating_sub(100) as i32;
+        // Update display panel rect (bottom 1/3 of view area)
+        let panel_rect = Rect::new(0, monitor_view_height as i32, size.width, panel_height);
+        self.display_panel.set_rect(panel_rect);
+
+        // Reposition footer widgets
+        let controls_y = size.height.saturating_sub(FOOTER_HEIGHT) as i32;
 
         // Buttons on the left
         self.btn_apply.set_position(10, controls_y + 60);
@@ -717,10 +822,13 @@ impl App {
         // Render monitor view
         self.monitor_view.render(&mut self.renderer, &self.theme)?;
 
-        // Render bottom controls area
+        // Render display panel
+        self.display_panel.render(&self.renderer, &self.theme)?;
+
+        // Render bottom controls area (footer)
         let size = self.renderer.size();
-        let controls_y = size.height.saturating_sub(100) as i32;
-        let controls_rect = Rect::new(0, controls_y, size.width, 100);
+        let controls_y = size.height.saturating_sub(FOOTER_HEIGHT) as i32;
+        let controls_rect = Rect::new(0, controls_y, size.width, FOOTER_HEIGHT);
         self.renderer
             .fill_rect(controls_rect, self.theme.background)?;
 

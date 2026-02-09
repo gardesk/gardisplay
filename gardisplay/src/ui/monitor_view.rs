@@ -2,7 +2,7 @@
 
 use gartk_core::{Color, InputEvent, MouseButton, Point, Rect, Theme};
 use gartk_render::Renderer;
-use gartk_x11::Monitor;
+use gartk_x11::{CursorShape, Monitor};
 use std::time::Instant;
 
 use super::EventResult;
@@ -22,6 +22,14 @@ pub struct MonitorState {
     pub scaled_rect: Rect,
     /// Real-world position (in actual pixels, updated after drag).
     pub real_position: Point,
+    /// Whether the monitor is enabled.
+    pub enabled: bool,
+    /// Refresh rate in Hz.
+    pub refresh: f64,
+    /// Rotation in degrees (0, 90, 180, 270).
+    pub rotation: u32,
+    /// Scale factor.
+    pub scale: f64,
 }
 
 /// State for an active drag operation.
@@ -96,6 +104,10 @@ impl MonitorView {
                     info,
                     scaled_rect,
                     real_position,
+                    enabled: true,
+                    refresh: 60.0, // Default, will be updated from RandR
+                    rotation: 0,
+                    scale: 1.0,
                 }
             })
             .collect();
@@ -707,10 +719,38 @@ impl MonitorView {
         self.selected
     }
 
+    /// Get the selected monitor state.
+    pub fn selected_monitor(&self) -> Option<&MonitorState> {
+        self.selected.and_then(|idx| self.monitors.get(idx))
+    }
+
     /// Get monitors.
     #[allow(dead_code)] // Used in Sprint 3 for RandR application
     pub fn monitors(&self) -> &[MonitorState] {
         &self.monitors
+    }
+
+    /// Update a monitor's configuration by name.
+    pub fn update_monitor_config(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        refresh: f64,
+        rotation: u32,
+        scale: f64,
+        enabled: bool,
+    ) {
+        if let Some(state) = self.monitors.iter_mut().find(|m| m.info.name == name) {
+            state.info.rect.width = width;
+            state.info.rect.height = height;
+            state.refresh = refresh;
+            state.rotation = rotation;
+            state.scale = scale;
+            state.enabled = enabled;
+            self.dirty = true;
+            self.recalculate_layout();
+        }
     }
 
     /// Get mutable monitors.
@@ -790,6 +830,17 @@ impl MonitorView {
                 ((rect.width as f64 * scale) as u32).max(1),
                 ((rect.height as f64 * scale) as u32).max(1),
             );
+        }
+    }
+
+    /// Get the cursor shape based on current state.
+    pub fn cursor_shape(&self) -> CursorShape {
+        if self.dragging.is_some() {
+            CursorShape::Move // Grabbing - four-arrow move cursor
+        } else if self.hovered.is_some() {
+            CursorShape::Pointer // Grab - hand cursor
+        } else {
+            CursorShape::Default
         }
     }
 }
