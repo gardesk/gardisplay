@@ -3,10 +3,52 @@
 use gartk_x11::Connection;
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
+use x11rb::protocol::render;
 
 use super::error::{RandrError, Result};
 use super::types::{ModeInfo, OutputInfo};
 use crate::config::MonitorConfig;
+
+/// Convert a floating-point value to X11 Fixed (16.16 fixed-point).
+fn float_to_fixed(value: f64) -> render::Fixed {
+    (value * 65536.0) as i32
+}
+
+/// Create an identity transform matrix (no transformation).
+fn identity_transform() -> render::Transform {
+    render::Transform {
+        matrix11: float_to_fixed(1.0),
+        matrix12: float_to_fixed(0.0),
+        matrix13: float_to_fixed(0.0),
+        matrix21: float_to_fixed(0.0),
+        matrix22: float_to_fixed(1.0),
+        matrix23: float_to_fixed(0.0),
+        matrix31: float_to_fixed(0.0),
+        matrix32: float_to_fixed(0.0),
+        matrix33: float_to_fixed(1.0),
+    }
+}
+
+/// Create a scaling transform matrix.
+/// A scale of 2.0 means everything appears 2x larger (lower effective resolution).
+/// A scale of 0.5 means everything appears 2x smaller (higher effective resolution).
+fn scale_transform(scale: f64) -> render::Transform {
+    // For X11 RandR transforms, the scale factor is applied inversely:
+    // To make things appear larger, we use a smaller transform value
+    // (we're scaling the source to fit a smaller area)
+    let factor = 1.0 / scale;
+    render::Transform {
+        matrix11: float_to_fixed(factor),
+        matrix12: float_to_fixed(0.0),
+        matrix13: float_to_fixed(0.0),
+        matrix21: float_to_fixed(0.0),
+        matrix22: float_to_fixed(factor),
+        matrix23: float_to_fixed(0.0),
+        matrix31: float_to_fixed(0.0),
+        matrix32: float_to_fixed(0.0),
+        matrix33: float_to_fixed(1.0),
+    }
+}
 
 /// Manager for RandR operations.
 pub struct RandrManager {
@@ -253,6 +295,15 @@ impl RandrManager {
         }
     }
 
+    /// Calculate the effective desktop dimensions after rotation.
+    /// Note: Scale is handled by the transform, not by changing mode resolution.
+    /// The framebuffer stays at the mode resolution; the transform scales output.
+    fn effective_dimensions(width: u32, height: u32, rotation: u32, _scale: f64) -> (u32, u32) {
+        // Scale doesn't affect framebuffer size - it's handled by the CRTC transform
+        // The mode resolution determines the framebuffer size
+        Self::rotated_dimensions(width, height, rotation)
+    }
+
     /// Calculate the required screen size to contain all given monitor configurations.
     pub fn calculate_required_screen_size(configs: &[MonitorConfig]) -> (u32, u32) {
         let mut max_x = 0u32;
@@ -263,8 +314,13 @@ impl RandrManager {
                 continue;
             }
 
-            let (eff_width, eff_height) =
-                Self::rotated_dimensions(config.width, config.height, config.rotation);
+            // Framebuffer size is based on mode resolution, not scaled
+            let (eff_width, eff_height) = Self::effective_dimensions(
+                config.width,
+                config.height,
+                config.rotation,
+                config.scale,
+            );
 
             let right = config.x.max(0) as u32 + eff_width;
             let bottom = config.y.max(0) as u32 + eff_height;
@@ -359,19 +415,25 @@ impl RandrManager {
         let crtc = self.find_available_crtc(&resources, &output_info, output)?;
 
         // Calculate effective dimensions after rotation
-        let (eff_width, eff_height) =
-            Self::rotated_dimensions(config.width, config.height, config.rotation);
+        // (scale is handled by transform, not mode resolution)
+        let (eff_width, eff_height) = Self::effective_dimensions(
+            config.width,
+            config.height,
+            config.rotation,
+            config.scale,
+        );
 
         // Calculate required screen size to contain this monitor
-        let required_width = config.x as u32 + eff_width;
-        let required_height = config.y as u32 + eff_height;
+        let required_width = config.x.max(0) as u32 + eff_width;
+        let required_height = config.y.max(0) as u32 + eff_height;
 
         tracing::debug!(
-            "apply_monitor {}: {}x{} rot={} -> effective {}x{} at ({}, {})",
+            "apply_monitor {}: {}x{} rot={} scale={:.2} -> effective {}x{} at ({}, {})",
             config.name,
             config.width,
             config.height,
             config.rotation,
+            config.scale,
             eff_width,
             eff_height,
             config.x,
@@ -415,12 +477,35 @@ impl RandrManager {
             )));
         }
 
+        // Apply scale transform if scale != 1.0
+        if (config.scale - 1.0).abs() > 0.001 {
+            let transform = scale_transform(config.scale);
+            tracing::debug!(
+                "applying scale transform {} for {} (factor={})",
+                config.scale,
+                config.name,
+                1.0 / config.scale
+            );
+
+            // Use "bilinear" filter for smooth scaling
+            self.conn
+                .inner()
+                .randr_set_crtc_transform(crtc, transform, b"bilinear", &[])?;
+        } else {
+            // Reset to identity transform when scale is 1.0
+            let transform = identity_transform();
+            self.conn
+                .inner()
+                .randr_set_crtc_transform(crtc, transform, b"nearest", &[])?;
+        }
+
         tracing::info!(
-            "applied config for {}: {}x{} rot={} at ({}, {})",
+            "applied config for {}: {}x{} rot={} scale={} at ({}, {})",
             config.name,
             config.width,
             config.height,
             config.rotation,
+            config.scale,
             config.x,
             config.y
         );
