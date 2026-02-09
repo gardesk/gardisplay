@@ -4,3 +4,4 @@ docs/
 CLAUDE.md
 target/
 Cargo.lock
+nohup.out

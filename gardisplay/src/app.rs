@@ -1,5 +1,7 @@
 //! Main application state and event loop.
 
+use std::process::Child;
+
 use anyhow::Result;
 use gartk_core::{Color, InputEvent, Key, Rect, Size, Theme};
 use gartk_render::{copy_surface_to_window, Renderer};
@@ -15,6 +17,7 @@ use crate::ui::{
     Button, ConfirmOverlay, ConfirmResult, DisplayPanel, DisplayPanelResult, Dropdown,
     DropdownAction, EventResult, MonitorView, TextInput,
 };
+use crate::watchdog;
 
 /// Window dimensions.
 const WINDOW_WIDTH: u32 = 800;
@@ -55,6 +58,9 @@ pub struct App {
     // Confirmation state for display changes
     confirm_overlay: Option<ConfirmOverlay>,
     pre_change_config: Option<Vec<MonitorConfig>>,
+    // Watchdog process for auto-revert (independent of main process)
+    #[allow(dead_code)] // Child kept alive for watchdog process
+    watchdog_child: Option<Child>,
 }
 
 impl App {
@@ -225,6 +231,7 @@ impl App {
             save_as_input: None,
             confirm_overlay: None,
             pre_change_config: None,
+            watchdog_child: None,
         })
     }
 
@@ -720,6 +727,22 @@ impl App {
             return;
         }
 
+        // Start the watchdog process for auto-revert
+        // This is more robust than relying on the event loop, which may crash
+        // if the display change causes X connection issues
+        if let Some(ref pre_config) = self.pre_change_config {
+            match watchdog::start_watchdog(pre_config) {
+                Ok(child) => {
+                    tracing::info!("started watchdog process for auto-revert");
+                    self.watchdog_child = Some(child);
+                }
+                Err(e) => {
+                    tracing::error!("failed to start watchdog: {}", e);
+                    // Continue anyway - we still have the in-process timeout
+                }
+            }
+        }
+
         // Show confirmation overlay
         let size = self.window.size();
         let window_rect = Rect::new(0, 0, size.width, size.height);
@@ -731,6 +754,10 @@ impl App {
     fn confirm_changes(&mut self) {
         self.confirm_overlay = None;
         self.pre_change_config = None;
+
+        // Cancel the watchdog by removing its config file
+        watchdog::cancel_watchdog();
+        self.watchdog_child = None;
 
         // Update original_monitors to current state
         let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
@@ -759,6 +786,10 @@ impl App {
     /// Revert to pre-change configuration.
     fn revert_to_pre_change(&mut self) {
         self.confirm_overlay = None;
+
+        // Cancel the watchdog - we're reverting manually
+        watchdog::cancel_watchdog();
+        self.watchdog_child = None;
 
         if let Some(ref configs) = self.pre_change_config.take() {
             if let Some(ref randr) = self.randr {
