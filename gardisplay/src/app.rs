@@ -130,6 +130,16 @@ impl App {
             match RandrManager::new(conn.clone()) {
                 Ok(r) => {
                     let outputs = r.get_outputs().unwrap_or_default();
+                    tracing::debug!("RandR: found {} outputs", outputs.len());
+                    for o in &outputs {
+                        tracing::debug!(
+                            "  {} connected={} modes={} current={:?}",
+                            o.name,
+                            o.connected,
+                            o.modes.len(),
+                            o.current_mode.as_ref().map(|m| format!("{}x{}@{:.0}Hz", m.width, m.height, m.refresh))
+                        );
+                    }
                     (Some(r), outputs)
                 }
                 Err(e) => {
@@ -547,6 +557,12 @@ impl App {
         if let Some(state) = self.monitor_view.selected_monitor() {
             // Find matching RandR output (may be None in demo mode)
             let output = self.randr_outputs.iter().find(|o| o.name == state.info.name);
+            tracing::debug!(
+                "sync_panel_selection: monitor={} output_found={} modes={}",
+                state.info.name,
+                output.is_some(),
+                output.map(|o| o.modes.len()).unwrap_or(0)
+            );
 
             self.display_panel.set_selected_monitor(
                 Some(&state.info.name),
