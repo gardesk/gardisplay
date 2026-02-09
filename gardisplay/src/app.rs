@@ -12,8 +12,8 @@ use x11rb::protocol::xproto::ConnectionExt;
 use crate::config::{Config, MonitorConfig, Profile};
 use crate::randr::{ModeInfo, OutputInfo, RandrManager};
 use crate::ui::{
-    Button, DisplayPanel, DisplayPanelResult, Dropdown, DropdownAction, EventResult, MonitorView,
-    TextInput,
+    Button, ConfirmOverlay, ConfirmResult, DisplayPanel, DisplayPanelResult, Dropdown,
+    DropdownAction, EventResult, MonitorView, TextInput,
 };
 
 /// Window dimensions.
@@ -52,6 +52,9 @@ pub struct App {
     btn_save: Button,
     btn_save_as: Button,
     save_as_input: Option<TextInput>,
+    // Confirmation state for display changes
+    confirm_overlay: Option<ConfirmOverlay>,
+    pre_change_config: Option<Vec<MonitorConfig>>,
 }
 
 impl App {
@@ -210,6 +213,8 @@ impl App {
             btn_save,
             btn_save_as,
             save_as_input: None,
+            confirm_overlay: None,
+            pre_change_config: None,
         })
     }
 
@@ -367,6 +372,27 @@ impl App {
 
     /// Handle an input event.
     fn handle_event(&mut self, event: &InputEvent) -> EventResult {
+        // Handle confirmation overlay first (blocks other input)
+        if let Some(ref mut overlay) = self.confirm_overlay {
+            match overlay.handle_event(event) {
+                ConfirmResult::Confirmed => {
+                    self.confirm_changes();
+                    return EventResult::Redraw;
+                }
+                ConfirmResult::Reverted => {
+                    self.revert_to_pre_change();
+                    return EventResult::Redraw;
+                }
+                ConfirmResult::Redraw => {
+                    return EventResult::Redraw;
+                }
+                ConfirmResult::None => {
+                    // Overlay consumes all events while active
+                    return EventResult::None;
+                }
+            }
+        }
+
         // Handle save-as text input first (captures keyboard when active)
         if let Some(ref mut input) = self.save_as_input {
             if let Some(submitted) = input.handle_event(event) {
@@ -538,7 +564,35 @@ impl App {
         }
     }
 
-    /// Apply the current layout via RandR.
+    /// Capture the current RandR state for potential revert.
+    fn capture_current_randr_state(&self) -> Option<Vec<MonitorConfig>> {
+        let randr = self.randr.as_ref()?;
+        let outputs = randr.get_outputs().ok()?;
+
+        Some(
+            outputs
+                .iter()
+                .filter(|o| o.connected && o.current_mode.is_some())
+                .map(|o| {
+                    let mode = o.current_mode.as_ref().unwrap();
+                    let pos = o.position.unwrap_or((0, 0));
+                    MonitorConfig {
+                        name: o.name.clone(),
+                        enabled: true,
+                        x: pos.0 as i32,
+                        y: pos.1 as i32,
+                        width: mode.width as u32,
+                        height: mode.height as u32,
+                        refresh: mode.refresh,
+                        scale: 1.0,
+                        rotation: 0, // TODO: capture actual rotation
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Apply the current layout via RandR with confirmation.
     fn apply_layout(&mut self) {
         if self.demo_mode {
             self.set_status("Demo mode - changes not applied");
@@ -550,45 +604,32 @@ impl App {
             return;
         };
 
+        // Capture current state before applying changes
+        self.pre_change_config = self.capture_current_randr_state();
+
         // Build MonitorConfig from current view state
-        // Collect all data we need before releasing the borrow
         let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
-        let configs: Vec<(MonitorConfig, Monitor)> = self
+        let configs: Vec<MonitorConfig> = self
             .monitor_view
             .monitors()
             .iter()
-            .map(|state| {
-                let config = MonitorConfig {
-                    name: state.info.name.clone(),
-                    enabled: true,
-                    x: state.real_position.x,
-                    y: state.real_position.y,
-                    width: state.info.rect.width,
-                    height: state.info.rect.height,
-                    refresh: 60.0, // TODO: get actual refresh rate
-                    scale: 1.0,
-                    rotation: 0,
-                };
-                let monitor = Monitor {
-                    name: state.info.name.clone(),
-                    rect: Rect::new(
-                        state.real_position.x,
-                        state.real_position.y,
-                        state.info.rect.width,
-                        state.info.rect.height,
-                    ),
-                    primary: primary_name.as_ref() == Some(&state.info.name),
-                    width_mm: state.info.width_mm,
-                    height_mm: state.info.height_mm,
-                };
-                (config, monitor)
+            .map(|state| MonitorConfig {
+                name: state.info.name.clone(),
+                enabled: state.enabled,
+                x: state.real_position.x,
+                y: state.real_position.y,
+                width: state.info.rect.width,
+                height: state.info.rect.height,
+                refresh: state.refresh,
+                scale: state.scale,
+                rotation: state.rotation,
             })
             .collect();
 
         let mut success_count = 0;
         let mut error_count = 0;
 
-        for (config, _) in &configs {
+        for config in &configs {
             match randr.apply_monitor(config) {
                 Ok(()) => success_count += 1,
                 Err(e) => {
@@ -609,16 +650,70 @@ impl App {
             tracing::error!("failed to flush: {}", e);
         }
 
-        if error_count == 0 {
-            self.set_status(&format!("Applied {} monitor(s)", success_count));
-            // Update original state after successful apply
-            self.original_monitors = configs.into_iter().map(|(_, m)| m).collect();
-        } else {
+        if error_count > 0 {
             self.set_status(&format!(
                 "Applied {} monitor(s), {} error(s)",
                 success_count, error_count
             ));
+            // Don't show confirmation on error, revert immediately
+            self.revert_to_pre_change();
+            return;
         }
+
+        // Show confirmation overlay
+        let size = self.window.size();
+        let window_rect = Rect::new(0, 0, size.width, size.height);
+        self.confirm_overlay = Some(ConfirmOverlay::new(window_rect));
+        self.set_status("Confirm display settings or they will revert...");
+    }
+
+    /// Confirm the applied changes (user accepted).
+    fn confirm_changes(&mut self) {
+        self.confirm_overlay = None;
+        self.pre_change_config = None;
+
+        // Update original_monitors to current state
+        let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
+        self.original_monitors = self
+            .monitor_view
+            .monitors()
+            .iter()
+            .map(|state| Monitor {
+                name: state.info.name.clone(),
+                rect: Rect::new(
+                    state.real_position.x,
+                    state.real_position.y,
+                    state.info.rect.width,
+                    state.info.rect.height,
+                ),
+                primary: primary_name.as_ref() == Some(&state.info.name),
+                width_mm: state.info.width_mm,
+                height_mm: state.info.height_mm,
+            })
+            .collect();
+
+        self.set_status("Display settings confirmed");
+        self.monitor_view.clear_dirty();
+    }
+
+    /// Revert to pre-change configuration.
+    fn revert_to_pre_change(&mut self) {
+        self.confirm_overlay = None;
+
+        if let Some(ref configs) = self.pre_change_config.take() {
+            if let Some(ref randr) = self.randr {
+                for config in configs {
+                    if let Err(e) = randr.apply_monitor(config) {
+                        tracing::error!("failed to revert {}: {}", config.name, e);
+                    }
+                }
+                let _ = randr.flush();
+            }
+        }
+
+        // Reset view to original monitors
+        self.monitor_view.set_monitors(self.original_monitors.clone());
+        self.set_status("Display settings reverted");
     }
 
     /// Revert to the original layout.
@@ -876,6 +971,11 @@ impl App {
         if let Some(ref mut input) = self.save_as_input {
             input.set_position(size.width as i32 - 210, controls_y + 25);
         }
+
+        // Update confirmation overlay rect if active
+        if let Some(ref mut overlay) = self.confirm_overlay {
+            overlay.set_rect(Rect::new(0, 0, size.width, size.height));
+        }
     }
 
     /// Render the application.
@@ -966,6 +1066,11 @@ impl App {
         self.btn_revert.render(&self.renderer, &self.theme)?;
         self.btn_save.render(&self.renderer, &self.theme)?;
         self.btn_save_as.render(&self.renderer, &self.theme)?;
+
+        // Render confirmation overlay (on top of everything)
+        if let Some(ref overlay) = self.confirm_overlay {
+            overlay.render(&self.renderer, &self.theme)?;
+        }
 
         // Blit to window
         copy_surface_to_window(self.renderer.surface_mut(), &self.window, self.gc, 0, 0)?;
