@@ -93,8 +93,12 @@ impl DisplayPanel {
     }
 
     /// Update panel to show settings for the selected monitor.
+    ///
+    /// `name` is the monitor name (required for selection).
+    /// `output` is optional RandR data for populating available modes.
     pub fn set_selected_monitor(
         &mut self,
+        name: Option<&str>,
         output: Option<&OutputInfo>,
         width: u32,
         height: u32,
@@ -103,56 +107,68 @@ impl DisplayPanel {
         scale: f64,
         enabled: bool,
     ) {
-        if let Some(output) = output {
-            self.selected_output = Some(output.name.clone());
-            self.available_modes = output.modes.clone();
+        if let Some(monitor_name) = name {
+            self.selected_output = Some(monitor_name.to_string());
 
-            // Populate resolution dropdown with unique resolutions
-            let resolutions: Vec<String> = output
-                .modes
-                .iter()
-                .map(|m| format!("{}x{}", m.width, m.height))
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            let mut sorted_resolutions: Vec<String> = resolutions;
-            sorted_resolutions.sort_by(|a, b| {
-                // Sort by resolution (width * height) descending
-                let parse_res = |s: &str| -> u64 {
-                    let parts: Vec<&str> = s.split('x').collect();
-                    if parts.len() == 2 {
-                        parts[0].parse::<u64>().unwrap_or(0)
-                            * parts[1].parse::<u64>().unwrap_or(0)
-                    } else {
-                        0
-                    }
-                };
-                parse_res(b).cmp(&parse_res(a))
-            });
-            self.resolution_dropdown.set_items(sorted_resolutions);
+            // Set current values
+            self.current_width = width;
+            self.current_height = height;
+            self.current_refresh = refresh;
+            self.current_rotation = rotation;
+            self.current_scale = scale;
+            self.current_enabled = enabled;
+
+            // Populate from RandR if available, otherwise use current values
+            if let Some(output) = output {
+                self.available_modes = output.modes.clone();
+
+                // Populate resolution dropdown with unique resolutions
+                let resolutions: Vec<String> = output
+                    .modes
+                    .iter()
+                    .map(|m| format!("{}x{}", m.width, m.height))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let mut sorted_resolutions: Vec<String> = resolutions;
+                sorted_resolutions.sort_by(|a, b| {
+                    let parse_res = |s: &str| -> u64 {
+                        let parts: Vec<&str> = s.split('x').collect();
+                        if parts.len() == 2 {
+                            parts[0].parse::<u64>().unwrap_or(0)
+                                * parts[1].parse::<u64>().unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    };
+                    parse_res(b).cmp(&parse_res(a))
+                });
+                self.resolution_dropdown.set_items(sorted_resolutions);
+
+                // Populate refresh rates for current resolution
+                self.update_refresh_dropdown(width, height);
+            } else {
+                // Demo mode: just show current resolution/refresh
+                self.available_modes.clear();
+                self.resolution_dropdown.set_items(vec![format!("{}x{}", width, height)]);
+                self.refresh_dropdown.set_items(vec![format!("{:.0}Hz", refresh)]);
+            }
 
             // Set current resolution
             let current_res = format!("{}x{}", width, height);
             self.resolution_dropdown.set_selected_by_name(&current_res);
-            self.current_width = width;
-            self.current_height = height;
-
-            // Populate refresh rates for current resolution
-            self.update_refresh_dropdown(width, height);
 
             // Set current refresh
             let current_refresh_str = format!("{:.0}Hz", refresh);
             self.refresh_dropdown.set_selected_by_name(&current_refresh_str);
-            self.current_refresh = refresh;
 
-            // Rotation options
+            // Rotation options (always available)
             self.rotation_dropdown
                 .set_items(vec!["0".to_string(), "90".to_string(), "180".to_string(), "270".to_string()]);
             self.rotation_dropdown
                 .set_selected_by_name(&rotation.to_string());
-            self.current_rotation = rotation;
 
-            // Scale options
+            // Scale options (always available)
             self.scale_dropdown.set_items(vec![
                 "1x".to_string(),
                 "1.25x".to_string(),
@@ -162,11 +178,9 @@ impl DisplayPanel {
             ]);
             let scale_str = format!("{}x", scale);
             self.scale_dropdown.set_selected_by_name(&scale_str);
-            self.current_scale = scale;
 
             // Enable toggle
             self.enabled_toggle.set_value(enabled);
-            self.current_enabled = enabled;
         } else {
             self.selected_output = None;
             self.available_modes.clear();

@@ -456,10 +456,11 @@ impl App {
     /// Sync the display panel with the selected monitor.
     fn sync_panel_selection(&mut self) {
         if let Some(state) = self.monitor_view.selected_monitor() {
-            // Find matching RandR output
+            // Find matching RandR output (may be None in demo mode)
             let output = self.randr_outputs.iter().find(|o| o.name == state.info.name);
 
             self.display_panel.set_selected_monitor(
+                Some(&state.info.name),
                 output,
                 state.info.rect.width,
                 state.info.rect.height,
@@ -470,7 +471,7 @@ impl App {
             );
         } else {
             self.display_panel
-                .set_selected_monitor(None, 0, 0, 60.0, 0, 1.0, true);
+                .set_selected_monitor(None, None, 0, 0, 60.0, 0, 1.0, true);
         }
     }
 
