@@ -12,6 +12,7 @@ use gartk_x11::{
 use x11rb::protocol::xproto::ConnectionExt;
 
 use crate::config::{Config, MonitorConfig, Profile};
+use crate::dpi;
 use crate::randr::{ModeInfo, OutputInfo, RandrManager};
 use crate::ui::{
     Button, ConfirmOverlay, ConfirmResult, DisplayPanel, DisplayPanelResult, Dropdown,
@@ -655,6 +656,9 @@ impl App {
         let randr = self.randr.as_ref()?;
         let outputs = randr.get_outputs().ok()?;
 
+        // Capture current DPI scale
+        let current_scale = dpi::get_current_scale();
+
         Some(
             outputs
                 .iter()
@@ -670,8 +674,8 @@ impl App {
                         width: mode.width as u32,
                         height: mode.height as u32,
                         refresh: mode.refresh,
-                        scale: 1.0,
-                        rotation: 0, // TODO: capture actual rotation
+                        scale: current_scale, // Capture current DPI scale
+                        rotation: 0,          // TODO: capture actual rotation
                     }
                 })
                 .collect(),
@@ -747,6 +751,20 @@ impl App {
         // Try to shrink screen to fit (non-fatal if it fails)
         if let Err(e) = randr.shrink_screen_to_fit() {
             tracing::debug!("shrink_screen_to_fit failed (non-fatal): {}", e);
+        }
+
+        // Apply DPI scaling if any monitor has non-1.0 scale
+        // Use the primary monitor's scale, or the first enabled monitor
+        let scale = configs
+            .iter()
+            .find(|c| c.enabled && primary_name.as_ref() == Some(&c.name))
+            .or_else(|| configs.iter().find(|c| c.enabled))
+            .map(|c| c.scale)
+            .unwrap_or(1.0);
+
+        if let Err(e) = dpi::apply_dpi_scale(scale) {
+            tracing::error!("failed to apply DPI scale: {}", e);
+            // Non-fatal - continue with the rest
         }
 
         if error_count > 0 {
@@ -842,6 +860,16 @@ impl App {
                 // Try to shrink screen to fit
                 if let Err(e) = randr.shrink_screen_to_fit() {
                     tracing::debug!("shrink_screen_to_fit failed during revert: {}", e);
+                }
+
+                // Restore DPI scale from pre-change config
+                let scale = configs
+                    .iter()
+                    .find(|c| c.enabled)
+                    .map(|c| c.scale)
+                    .unwrap_or(1.0);
+                if let Err(e) = dpi::apply_dpi_scale(scale) {
+                    tracing::error!("failed to restore DPI scale: {}", e);
                 }
             }
         }

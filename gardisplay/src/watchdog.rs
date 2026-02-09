@@ -111,26 +111,27 @@ fn generate_xrandr_commands(configs: &[MonitorConfig]) -> String {
             _ => "normal",
         };
 
-        // Always include scale to reset any transforms
-        // scale 1x1 resets to identity transform
-        let scale = if (config.scale - 1.0).abs() > 0.001 {
-            config.scale
-        } else {
-            1.0
-        };
-
+        // Reset any RandR transforms to identity (scale 1x1)
         commands.push(format!(
-            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {} --scale {}x{}",
+            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {} --scale 1x1",
             config.name,
             config.width,
             config.height,
             config.x,
             config.y,
-            rotation,
-            scale,
-            scale
+            rotation
         ));
     }
+
+    // Also reset DPI to the config's scale value via xrdb
+    // Find the first enabled config's scale
+    let scale = configs
+        .iter()
+        .find(|c| c.enabled)
+        .map(|c| c.scale)
+        .unwrap_or(1.0);
+    let dpi = (96.0 * scale).round() as u32;
+    commands.push(format!("echo 'Xft.dpi: {}' | xrdb -merge", dpi));
 
     commands.join("\n            ")
 }

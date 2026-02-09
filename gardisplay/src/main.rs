@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod dpi;
 mod randr;
 mod ui;
 mod watchdog;
