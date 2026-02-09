@@ -10,7 +10,7 @@ use gartk_x11::{
 use x11rb::protocol::xproto::ConnectionExt;
 
 use crate::config::{Config, MonitorConfig, Profile};
-use crate::randr::{OutputInfo, RandrManager};
+use crate::randr::{ModeInfo, OutputInfo, RandrManager};
 use crate::ui::{
     Button, DisplayPanel, DisplayPanelResult, Dropdown, DropdownAction, EventResult, MonitorView,
     TextInput,
@@ -122,7 +122,7 @@ impl App {
 
         // Create RandR manager (only in non-demo mode)
         let (randr, randr_outputs) = if demo {
-            (None, Vec::new())
+            (None, Self::demo_outputs())
         } else {
             match RandrManager::new(conn.clone()) {
                 Ok(r) => {
@@ -249,24 +249,87 @@ impl App {
         vec![
             gartk_x11::Monitor {
                 name: "eDP-1".to_string(),
-                rect: Rect::new(0, 0, 2560, 1600),
+                rect: Rect::new(0, 0, 2880, 1800),
                 primary: true,
-                width_mm: 290,
-                height_mm: 180,
+                width_mm: 301,
+                height_mm: 188,
             },
             gartk_x11::Monitor {
                 name: "HDMI-1".to_string(),
-                rect: Rect::new(2560, 0, 1920, 1080),
+                rect: Rect::new(2880, 0, 1920, 1080),
                 primary: false,
                 width_mm: 530,
                 height_mm: 300,
             },
             gartk_x11::Monitor {
                 name: "DP-1".to_string(),
-                rect: Rect::new(2560, 1080, 1920, 1080),
+                rect: Rect::new(2880, 1080, 2560, 1440),
                 primary: false,
+                width_mm: 597,
+                height_mm: 336,
+            },
+        ]
+    }
+
+    /// Create demo RandR outputs with available modes for UI testing.
+    fn demo_outputs() -> Vec<OutputInfo> {
+        vec![
+            OutputInfo {
+                name: "eDP-1".to_string(),
+                output: 0,
+                crtc: Some(0),
+                connected: true,
+                modes: vec![
+                    ModeInfo { id: 1, width: 2880, height: 1800, refresh: 60.0 },
+                    ModeInfo { id: 2, width: 2560, height: 1600, refresh: 60.0 },
+                    ModeInfo { id: 3, width: 1920, height: 1200, refresh: 60.0 },
+                    ModeInfo { id: 4, width: 1920, height: 1080, refresh: 60.0 },
+                    ModeInfo { id: 5, width: 1680, height: 1050, refresh: 60.0 },
+                    ModeInfo { id: 6, width: 1440, height: 900, refresh: 60.0 },
+                    ModeInfo { id: 7, width: 1280, height: 800, refresh: 60.0 },
+                ],
+                current_mode: Some(ModeInfo { id: 1, width: 2880, height: 1800, refresh: 60.0 }),
+                position: Some((0, 0)),
+                width_mm: 301,
+                height_mm: 188,
+            },
+            OutputInfo {
+                name: "HDMI-1".to_string(),
+                output: 1,
+                crtc: Some(1),
+                connected: true,
+                modes: vec![
+                    ModeInfo { id: 10, width: 3840, height: 2160, refresh: 60.0 },
+                    ModeInfo { id: 11, width: 3840, height: 2160, refresh: 30.0 },
+                    ModeInfo { id: 12, width: 2560, height: 1440, refresh: 60.0 },
+                    ModeInfo { id: 13, width: 1920, height: 1080, refresh: 120.0 },
+                    ModeInfo { id: 14, width: 1920, height: 1080, refresh: 60.0 },
+                    ModeInfo { id: 15, width: 1920, height: 1080, refresh: 30.0 },
+                    ModeInfo { id: 16, width: 1280, height: 720, refresh: 60.0 },
+                ],
+                current_mode: Some(ModeInfo { id: 14, width: 1920, height: 1080, refresh: 60.0 }),
+                position: Some((2880, 0)),
                 width_mm: 530,
                 height_mm: 300,
+            },
+            OutputInfo {
+                name: "DP-1".to_string(),
+                output: 2,
+                crtc: Some(2),
+                connected: true,
+                modes: vec![
+                    ModeInfo { id: 20, width: 2560, height: 1440, refresh: 144.0 },
+                    ModeInfo { id: 21, width: 2560, height: 1440, refresh: 120.0 },
+                    ModeInfo { id: 22, width: 2560, height: 1440, refresh: 60.0 },
+                    ModeInfo { id: 23, width: 1920, height: 1080, refresh: 144.0 },
+                    ModeInfo { id: 24, width: 1920, height: 1080, refresh: 120.0 },
+                    ModeInfo { id: 25, width: 1920, height: 1080, refresh: 60.0 },
+                    ModeInfo { id: 26, width: 1280, height: 720, refresh: 60.0 },
+                ],
+                current_mode: Some(ModeInfo { id: 22, width: 2560, height: 1440, refresh: 60.0 }),
+                position: Some((2880, 1080)),
+                width_mm: 597,
+                height_mm: 336,
             },
         ]
     }
