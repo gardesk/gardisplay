@@ -16,7 +16,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 /// Visual representation of a monitor in the layout.
 #[derive(Debug, Clone)]
 pub struct MonitorState {
-    /// Monitor info from X11.
+    /// Monitor info from X11. rect.width/height hold effective (scaled) dimensions.
     pub info: Monitor,
     /// Scaled rectangle for display (updated during drag).
     pub scaled_rect: Rect,
@@ -30,6 +30,10 @@ pub struct MonitorState {
     pub rotation: u32,
     /// Scale factor.
     pub scale: f64,
+    /// Raw mode width (hardware resolution, before scaling).
+    pub mode_width: u32,
+    /// Raw mode height (hardware resolution, before scaling).
+    pub mode_height: u32,
 }
 
 /// State for an active drag operation.
@@ -100,6 +104,8 @@ impl MonitorView {
             .map(|info| {
                 let scaled_rect = self.scale_rect(&info.rect);
                 let real_position = Point::new(info.rect.x, info.rect.y);
+                let mode_width = info.rect.width;
+                let mode_height = info.rect.height;
                 MonitorState {
                     info,
                     scaled_rect,
@@ -108,6 +114,8 @@ impl MonitorView {
                     refresh: 60.0, // Default, will be updated from RandR
                     rotation: 0,
                     scale: 1.0,
+                    mode_width,
+                    mode_height,
                 }
             })
             .collect();
@@ -742,14 +750,37 @@ impl MonitorView {
         enabled: bool,
     ) {
         if let Some(state) = self.monitors.iter_mut().find(|m| m.info.name == name) {
-            state.info.rect.width = width;
-            state.info.rect.height = height;
+            // Store raw mode resolution
+            state.mode_width = width;
+            state.mode_height = height;
             state.refresh = refresh;
             state.rotation = rotation;
             state.scale = scale;
             state.enabled = enabled;
+
+            // Set info.rect to effective (scaled) dimensions for visual layout
+            let (eff_w, eff_h) = Self::effective_dimensions(width, height, rotation, scale);
+            state.info.rect.width = eff_w;
+            state.info.rect.height = eff_h;
+
             self.dirty = true;
             self.recalculate_layout();
+        }
+    }
+
+    /// Calculate effective dimensions after rotation and scaling.
+    /// Mirrors the logic in RandrManager::effective_dimensions.
+    fn effective_dimensions(width: u32, height: u32, rotation: u32, scale: f64) -> (u32, u32) {
+        let (rot_w, rot_h) = match rotation {
+            90 | 270 => (height, width),
+            _ => (width, height),
+        };
+        if (scale - 1.0).abs() < 0.001 {
+            (rot_w, rot_h)
+        } else {
+            let eff_w = (rot_w as f64 / scale).round() as u32;
+            let eff_h = (rot_h as f64 / scale).round() as u32;
+            (eff_w.max(1), eff_h.max(1))
         }
     }
 

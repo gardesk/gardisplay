@@ -111,15 +111,22 @@ fn generate_xrandr_commands(configs: &[MonitorConfig]) -> String {
             _ => "normal",
         };
 
-        // Reset any RandR transforms to identity (scale 1x1)
+        // Apply RandR transform for scaling (xrandr --scale uses inverse of UI scale)
+        let xrandr_scale = if (config.scale - 1.0).abs() > 0.001 {
+            let s = 1.0 / config.scale;
+            format!("{:.4}x{:.4}", s, s)
+        } else {
+            "1x1".to_string()
+        };
         commands.push(format!(
-            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {} --scale 1x1",
+            "xrandr --output {} --mode {}x{} --pos {}x{} --rotate {} --scale {}",
             config.name,
             config.width,
             config.height,
             config.x,
             config.y,
-            rotation
+            rotation,
+            xrandr_scale
         ));
     }
 
@@ -168,7 +175,28 @@ mod tests {
         ];
 
         let commands = generate_xrandr_commands(&configs);
-        assert!(commands.contains("xrandr --output eDP-1 --mode 2880x1800 --pos 0x0 --rotate normal"));
-        assert!(commands.contains("xrandr --output HDMI-1 --mode 1920x1080 --pos 2880x0 --rotate left"));
+        assert!(commands.contains("xrandr --output eDP-1 --mode 2880x1800 --pos 0x0 --rotate normal --scale 1x1"));
+        assert!(commands.contains("xrandr --output HDMI-1 --mode 1920x1080 --pos 2880x0 --rotate left --scale 1x1"));
+    }
+
+    #[test]
+    fn test_generate_xrandr_commands_scaled() {
+        let configs = vec![MonitorConfig {
+            name: "eDP-1".to_string(),
+            enabled: true,
+            x: 0,
+            y: 0,
+            width: 2880,
+            height: 1800,
+            refresh: 60.0,
+            scale: 2.0,
+            rotation: 0,
+        }];
+
+        let commands = generate_xrandr_commands(&configs);
+        // scale 2.0 → xrandr --scale 0.5x0.5
+        assert!(commands.contains("--scale 0.5000x0.5000"));
+        // DPI should be 192 for scale 2.0
+        assert!(commands.contains("Xft.dpi: 192"));
     }
 }

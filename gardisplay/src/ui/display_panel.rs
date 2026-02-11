@@ -30,6 +30,24 @@ pub enum DisplayPanelResult {
     ConfigChanged(DisplayPanelConfig),
 }
 
+/// A virtual resolution entry: native mode + scale factor.
+#[derive(Debug, Clone)]
+struct VirtualResolution {
+    /// Effective width after scaling.
+    eff_width: u32,
+    /// Effective height after scaling.
+    eff_height: u32,
+    /// Scale factor that produces this effective resolution.
+    scale: f64,
+    /// The native mode width.
+    native_width: u32,
+    /// The native mode height.
+    native_height: u32,
+}
+
+/// Common scale factors for generating virtual resolutions.
+const VIRTUAL_SCALE_FACTORS: &[f64] = &[1.0, 1.25, 1.5, 2.0];
+
 /// Display settings panel for the selected monitor.
 pub struct DisplayPanel {
     rect: Rect,
@@ -42,6 +60,8 @@ pub struct DisplayPanel {
     // State
     selected_output: Option<String>,
     available_modes: Vec<ModeInfo>,
+    /// Virtual resolution entries (populated when driver has limited modes).
+    virtual_resolutions: Vec<VirtualResolution>,
     // Current values
     current_width: u32,
     current_height: u32,
@@ -83,6 +103,7 @@ impl DisplayPanel {
             enabled_toggle,
             selected_output: None,
             available_modes: Vec::new(),
+            virtual_resolutions: Vec::new(),
             current_width: 0,
             current_height: 0,
             current_refresh: 60.0,
@@ -122,41 +143,100 @@ impl DisplayPanel {
             if let Some(output) = output {
                 self.available_modes = output.modes.clone();
 
-                // Populate resolution dropdown with unique resolutions
-                let resolutions: Vec<String> = output
+                // Collect unique hardware resolutions
+                let unique_resolutions: HashSet<String> = output
                     .modes
                     .iter()
                     .map(|m| format!("{}x{}", m.width, m.height))
-                    .collect::<HashSet<_>>()
-                    .into_iter()
                     .collect();
-                let mut sorted_resolutions: Vec<String> = resolutions;
-                sorted_resolutions.sort_by(|a, b| {
-                    let parse_res = |s: &str| -> u64 {
-                        let parts: Vec<&str> = s.split('x').collect();
-                        if parts.len() == 2 {
-                            parts[0].parse::<u64>().unwrap_or(0)
-                                * parts[1].parse::<u64>().unwrap_or(0)
-                        } else {
-                            0
-                        }
-                    };
-                    parse_res(b).cmp(&parse_res(a))
-                });
-                self.resolution_dropdown.set_items(sorted_resolutions);
+
+                // If the driver only has 1 unique resolution (e.g., appledrm on Apple Silicon),
+                // generate virtual resolutions using CRTC transform scale factors.
+                // This mimics macOS's "scaled resolutions" list.
+                if unique_resolutions.len() <= 1 {
+                    if let Some(native) = output.modes.first() {
+                        self.virtual_resolutions = VIRTUAL_SCALE_FACTORS
+                            .iter()
+                            .map(|&s| {
+                                let ew = (native.width as f64 / s).round() as u32;
+                                let eh = (native.height as f64 / s).round() as u32;
+                                VirtualResolution {
+                                    eff_width: ew,
+                                    eff_height: eh,
+                                    scale: s,
+                                    native_width: native.width as u32,
+                                    native_height: native.height as u32,
+                                }
+                            })
+                            .collect();
+
+                        let mut sorted: Vec<String> = self
+                            .virtual_resolutions
+                            .iter()
+                            .map(|vr| format!("{}x{}", vr.eff_width, vr.eff_height))
+                            .collect();
+                        sorted.sort_by(|a, b| {
+                            let parse_res = |s: &str| -> u64 {
+                                // Parse "WxH" or "WxH (Sx)" — grab just the WxH part
+                                let wxh = s.split_whitespace().next().unwrap_or(s);
+                                let parts: Vec<&str> = wxh.split('x').collect();
+                                if parts.len() == 2 {
+                                    parts[0].parse::<u64>().unwrap_or(0)
+                                        * parts[1].parse::<u64>().unwrap_or(0)
+                                } else {
+                                    0
+                                }
+                            };
+                            parse_res(b).cmp(&parse_res(a))
+                        });
+                        self.resolution_dropdown.set_items(sorted);
+                    }
+                } else {
+                    // Multiple hardware modes available — use them directly
+                    self.virtual_resolutions.clear();
+                    let mut sorted_resolutions: Vec<String> =
+                        unique_resolutions.into_iter().collect();
+                    sorted_resolutions.sort_by(|a, b| {
+                        let parse_res = |s: &str| -> u64 {
+                            let parts: Vec<&str> = s.split('x').collect();
+                            if parts.len() == 2 {
+                                parts[0].parse::<u64>().unwrap_or(0)
+                                    * parts[1].parse::<u64>().unwrap_or(0)
+                            } else {
+                                0
+                            }
+                        };
+                        parse_res(b).cmp(&parse_res(a))
+                    });
+                    self.resolution_dropdown.set_items(sorted_resolutions);
+                }
 
                 // Populate refresh rates for current resolution
                 self.update_refresh_dropdown(width, height);
             } else {
                 // Demo mode: just show current resolution/refresh
                 self.available_modes.clear();
+                self.virtual_resolutions.clear();
                 self.resolution_dropdown.set_items(vec![format!("{}x{}", width, height)]);
                 self.refresh_dropdown.set_items(vec![format!("{:.0}Hz", refresh)]);
             }
 
-            // Set current resolution
-            let current_res = format!("{}x{}", width, height);
-            self.resolution_dropdown.set_selected_by_name(&current_res);
+            // Set current resolution in dropdown.
+            if !self.virtual_resolutions.is_empty() {
+                // Find the virtual resolution matching the current scale
+                let target = self
+                    .virtual_resolutions
+                    .iter()
+                    .find(|vr| (vr.scale - scale).abs() < 0.01)
+                    .or_else(|| self.virtual_resolutions.first());
+                if let Some(vr) = target {
+                    let label = format!("{}x{}", vr.eff_width, vr.eff_height);
+                    self.resolution_dropdown.set_selected_by_name(&label);
+                }
+            } else {
+                let current_res = format!("{}x{}", width, height);
+                self.resolution_dropdown.set_selected_by_name(&current_res);
+            }
 
             // Set current refresh
             let current_refresh_str = format!("{:.0}Hz", refresh);
@@ -207,6 +287,24 @@ impl DisplayPanel {
             parse_hz(b).partial_cmp(&parse_hz(a)).unwrap_or(std::cmp::Ordering::Equal)
         });
         self.refresh_dropdown.set_items(sorted_refreshes);
+    }
+
+    /// Find a virtual resolution entry matching a dropdown label.
+    /// Labels are either "WxH" (for scale 1x) or "WxH (Sx)" (for other scales).
+    fn find_virtual_resolution(&self, label: &str) -> Option<VirtualResolution> {
+        // Parse the effective dimensions from the label
+        let wxh = label.split_whitespace().next().unwrap_or(label);
+        let parts: Vec<&str> = wxh.split('x').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let w: u32 = parts[0].parse().ok()?;
+        let h: u32 = parts[1].parse().ok()?;
+
+        self.virtual_resolutions
+            .iter()
+            .find(|vr| vr.eff_width == w && vr.eff_height == h)
+            .cloned()
     }
 
     /// Get the current configuration.
@@ -267,22 +365,36 @@ impl DisplayPanel {
         if let Some(action) = self.resolution_dropdown.handle_event(event) {
             if let crate::ui::widgets::DropdownAction::Select(_) = action {
                 if let Some(res) = self.resolution_dropdown.selected_item() {
-                    // Parse resolution
-                    let parts: Vec<&str> = res.split('x').collect();
-                    if parts.len() == 2 {
-                        if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                            self.current_width = w;
-                            self.current_height = h;
-                            // Update refresh rates for new resolution
-                            self.update_refresh_dropdown(w, h);
-                            // Select first available refresh rate
-                            if let Some(first_refresh) = self.refresh_dropdown.selected_item() {
-                                let hz_str = first_refresh.trim_end_matches("Hz");
-                                if let Ok(hz) = hz_str.parse::<f64>() {
-                                    self.current_refresh = hz;
-                                }
+                    // Check if this is a virtual resolution (has scale annotation like "(2x)")
+                    if let Some(vr) = self.find_virtual_resolution(res) {
+                        // Virtual resolution: use native mode + scale
+                        self.current_width = vr.native_width;
+                        self.current_height = vr.native_height;
+                        self.current_scale = vr.scale;
+                        // Sync the scale dropdown
+                        let scale_str = format!("{}x", vr.scale);
+                        self.scale_dropdown.set_selected_by_name(&scale_str);
+                        self.update_refresh_dropdown(vr.native_width, vr.native_height);
+                        config_changed = true;
+                    } else {
+                        // Real hardware resolution: parse WxH
+                        let parts: Vec<&str> = res.split('x').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) =
+                                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                            {
+                                self.current_width = w;
+                                self.current_height = h;
+                                self.update_refresh_dropdown(w, h);
+                                config_changed = true;
                             }
-                            config_changed = true;
+                        }
+                    }
+                    // Select first available refresh rate
+                    if let Some(first_refresh) = self.refresh_dropdown.selected_item() {
+                        let hz_str = first_refresh.trim_end_matches("Hz");
+                        if let Ok(hz) = hz_str.parse::<f64>() {
+                            self.current_refresh = hz;
                         }
                     }
                 }
@@ -336,6 +448,15 @@ impl DisplayPanel {
                     let scale_str = scale.trim_end_matches('x');
                     if let Ok(s) = scale_str.parse::<f64>() {
                         self.current_scale = s;
+                        // Sync virtual resolution dropdown if active
+                        if let Some(vr) = self
+                            .virtual_resolutions
+                            .iter()
+                            .find(|vr| (vr.scale - s).abs() < 0.01)
+                        {
+                            let label = format!("{}x{}", vr.eff_width, vr.eff_height);
+                            self.resolution_dropdown.set_selected_by_name(&label);
+                        }
                         config_changed = true;
                     }
                 }

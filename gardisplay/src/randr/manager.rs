@@ -3,10 +3,50 @@
 use gartk_x11::Connection;
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
+use x11rb::protocol::render;
+use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
 
 use super::error::{RandrError, Result};
 use super::types::{ModeInfo, OutputInfo};
 use crate::config::MonitorConfig;
+
+/// Convert a floating-point value to X11 Fixed (16.16 fixed-point).
+fn float_to_fixed(value: f64) -> render::Fixed {
+    (value * 65536.0) as i32
+}
+
+/// Create an identity transform matrix (no transformation).
+fn identity_transform() -> render::Transform {
+    render::Transform {
+        matrix11: float_to_fixed(1.0),
+        matrix12: float_to_fixed(0.0),
+        matrix13: float_to_fixed(0.0),
+        matrix21: float_to_fixed(0.0),
+        matrix22: float_to_fixed(1.0),
+        matrix23: float_to_fixed(0.0),
+        matrix31: float_to_fixed(0.0),
+        matrix32: float_to_fixed(0.0),
+        matrix33: float_to_fixed(1.0),
+    }
+}
+
+/// Create a scaling transform matrix.
+/// For RandR CRTC transforms, `scale` is the UI scale factor (e.g., 2.0 = "2x bigger").
+/// The transform uses the inverse: 1/scale on the diagonal.
+fn scale_transform(scale: f64) -> render::Transform {
+    let factor = 1.0 / scale;
+    render::Transform {
+        matrix11: float_to_fixed(factor),
+        matrix12: float_to_fixed(0.0),
+        matrix13: float_to_fixed(0.0),
+        matrix21: float_to_fixed(0.0),
+        matrix22: float_to_fixed(factor),
+        matrix23: float_to_fixed(0.0),
+        matrix31: float_to_fixed(0.0),
+        matrix32: float_to_fixed(0.0),
+        matrix33: float_to_fixed(1.0),
+    }
+}
 
 /// Manager for RandR operations.
 pub struct RandrManager {
@@ -190,20 +230,17 @@ impl RandrManager {
     /// Ensure the virtual screen is large enough to contain the given bounds.
     /// This must be called before applying configurations that might exceed the current screen size.
     pub fn ensure_screen_size(&self, required_width: u32, required_height: u32) -> Result<()> {
-        let _resources = self.get_resources()?;
-
-        // Get current screen info
-        let screen_info = self
+        // Use root window geometry to get the actual current virtual screen size.
+        // GetScreenInfo returns discrete "advertised" sizes which may not reflect
+        // the current virtual size set by RRSetScreenSize.
+        let geom = self
             .conn
             .inner()
-            .randr_get_screen_info(self.root)?
-            .reply()?;
+            .get_geometry(self.root)?
+            .reply()
+            .map_err(|e| RandrError::ConfigFailed(format!("get_geometry: {}", e)))?;
 
-        let current_size = screen_info
-            .sizes
-            .get(screen_info.size_id as usize)
-            .map(|s| (s.width as u32, s.height as u32))
-            .unwrap_or((0, 0));
+        let current_size = (geom.width as u32, geom.height as u32);
 
         tracing::debug!(
             "ensure_screen_size: current={}x{}, required={}x{}",
@@ -253,13 +290,19 @@ impl RandrManager {
         }
     }
 
-    /// Calculate the effective desktop dimensions after rotation.
-    /// Note: Scale is handled by the transform, not by changing mode resolution.
-    /// The framebuffer stays at the mode resolution; the transform scales output.
-    fn effective_dimensions(width: u32, height: u32, rotation: u32, _scale: f64) -> (u32, u32) {
-        // Scale doesn't affect framebuffer size - it's handled by the CRTC transform
-        // The mode resolution determines the framebuffer size
-        Self::rotated_dimensions(width, height, rotation)
+    /// Calculate the effective desktop dimensions after rotation and scaling.
+    /// The CRTC transform scales the output, so the framebuffer (what apps see)
+    /// is the mode resolution divided by the scale factor.
+    /// e.g., 2880x1800 at scale 2.0 → effective 1440x900 framebuffer.
+    fn effective_dimensions(width: u32, height: u32, rotation: u32, scale: f64) -> (u32, u32) {
+        let (rot_w, rot_h) = Self::rotated_dimensions(width, height, rotation);
+        if (scale - 1.0).abs() < 0.001 {
+            (rot_w, rot_h)
+        } else {
+            let eff_w = (rot_w as f64 / scale).round() as u32;
+            let eff_h = (rot_h as f64 / scale).round() as u32;
+            (eff_w.max(1), eff_h.max(1))
+        }
     }
 
     /// Calculate the required screen size to contain all given monitor configurations.
@@ -293,6 +336,7 @@ impl RandrManager {
 
     /// Prepare the screen for a set of monitor configurations.
     /// This should be called before applying any configurations to ensure the screen is large enough.
+    #[allow(dead_code)] // Available but apply_layout now uses disable→resize→apply pattern
     pub fn prepare_screen_for_configs(&self, configs: &[MonitorConfig]) -> Result<()> {
         let (required_width, required_height) = Self::calculate_required_screen_size(configs);
         tracing::info!(
@@ -304,8 +348,33 @@ impl RandrManager {
         self.ensure_screen_size(required_width, required_height)
     }
 
+    /// Read the current CRTC transform scale factor.
+    /// Returns 1.0 if no transform or identity transform.
+    pub fn get_crtc_scale(&self, crtc: randr::Crtc) -> f64 {
+        let Ok(cookie) = self.conn.inner().randr_get_crtc_transform(crtc) else {
+            return 1.0;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return 1.0;
+        };
+
+        // The current transform matrix11 is 1/scale in 16.16 fixed-point
+        let matrix11 = reply.current_transform.matrix11;
+        if matrix11 <= 0 {
+            return 1.0;
+        }
+
+        let factor = matrix11 as f64 / 65536.0;
+        if (factor - 1.0).abs() < 0.001 {
+            1.0
+        } else {
+            1.0 / factor // Convert back to UI scale
+        }
+    }
+
     /// Shrink the screen to the minimum size required for the current outputs.
     /// Call this after applying all configurations to clean up excess virtual screen space.
+    /// Accounts for CRTC transforms (scaling) when computing effective dimensions.
     pub fn shrink_screen_to_fit(&self) -> Result<()> {
         let outputs = self.get_outputs()?;
 
@@ -317,8 +386,12 @@ impl RandrManager {
                 continue;
             }
             if let (Some(mode), Some(pos)) = (&output.current_mode, output.position) {
-                let right = pos.0.max(0) as u32 + mode.width as u32;
-                let bottom = pos.1.max(0) as u32 + mode.height as u32;
+                // Check if this output has a scale transform
+                let scale = output.crtc.map(|c| self.get_crtc_scale(c)).unwrap_or(1.0);
+                let (eff_w, eff_h) =
+                    Self::effective_dimensions(mode.width as u32, mode.height as u32, 0, scale);
+                let right = pos.0.max(0) as u32 + eff_w;
+                let bottom = pos.1.max(0) as u32 + eff_h;
                 max_x = max_x.max(right);
                 max_y = max_y.max(bottom);
             }
@@ -412,7 +485,34 @@ impl RandrManager {
             _ => randr::Rotation::ROTATE0,
         };
 
-        // Apply configuration
+        // Set CRTC transform BEFORE set_crtc_config.
+        // Per the RandR spec, SetCrtcTransform stores a "pending" transform.
+        // The next SetCrtcConfig call activates it. So we must set the transform first.
+        if (config.scale - 1.0).abs() > 0.001 {
+            let transform = scale_transform(config.scale);
+            let filter = if (config.scale.round() - config.scale).abs() < 0.001 {
+                b"nearest".as_slice() // Integer scale: pixel-perfect
+            } else {
+                b"bilinear".as_slice() // Fractional scale: smooth interpolation
+            };
+            self.conn
+                .inner()
+                .randr_set_crtc_transform(crtc, transform, filter, &[])?;
+            tracing::info!(
+                "set pending CRTC transform {:.2}x for {} (filter={})",
+                config.scale,
+                config.name,
+                String::from_utf8_lossy(filter)
+            );
+        } else {
+            // Reset to identity transform
+            let transform = identity_transform();
+            self.conn
+                .inner()
+                .randr_set_crtc_transform(crtc, transform, b"nearest", &[])?;
+        }
+
+        // Apply configuration — this activates the pending transform
         let result = self
             .conn
             .inner()
@@ -434,9 +534,6 @@ impl RandrManager {
                 result.status
             )));
         }
-
-        // Note: Scale is handled via DPI settings, not RandR transforms
-        // RandR transforms don't work well for HiDPI scaling on X11
 
         tracing::info!(
             "applied config for {}: {}x{} rot={} scale={} at ({}, {})",
@@ -568,6 +665,67 @@ impl RandrManager {
 
         let name = String::from_utf8_lossy(&output_info.name).to_string();
         Err(RandrError::NoCrtcAvailable(name))
+    }
+
+    /// Set the screen to an exact size.
+    /// All CRTCs should be disabled first to avoid validation failures.
+    #[allow(dead_code)] // Available for direct screen resize
+    pub fn resize_screen(&self, width: u32, height: u32) -> Result<()> {
+        let mm_width = (width as f64 * 25.4 / 96.0) as u32;
+        let mm_height = (height as f64 * 25.4 / 96.0) as u32;
+
+        tracing::info!(
+            "resizing screen to {}x{} ({}x{}mm)",
+            width,
+            height,
+            mm_width,
+            mm_height
+        );
+
+        self.conn.inner().randr_set_screen_size(
+            self.root,
+            width as u16,
+            height as u16,
+            mm_width,
+            mm_height,
+        )?;
+        self.conn.inner().flush()?;
+        Ok(())
+    }
+
+    /// Disable all connected outputs (set CRTCs to mode 0).
+    #[allow(dead_code)] // Available for screen resize operations
+    pub fn disable_all_crtcs(&self) -> Result<()> {
+        let resources = self.get_resources()?;
+
+        for &crtc in &resources.crtcs {
+            let crtc_info = self
+                .conn
+                .inner()
+                .randr_get_crtc_info(crtc, resources.config_timestamp)?
+                .reply()?;
+
+            // Only disable active CRTCs (those with a mode set)
+            if crtc_info.mode != 0 {
+                self.conn
+                    .inner()
+                    .randr_set_crtc_config(
+                        crtc,
+                        resources.timestamp,
+                        resources.config_timestamp,
+                        0,
+                        0,
+                        0, // mode 0 = disable
+                        randr::Rotation::ROTATE0,
+                        &[],
+                    )?
+                    .reply()?;
+            }
+        }
+
+        self.conn.inner().flush()?;
+        tracing::debug!("disabled all active CRTCs");
+        Ok(())
     }
 
     /// Flush pending X11 requests.

@@ -266,7 +266,7 @@ impl App {
             return;
         }
 
-        // Update monitor positions from profile
+        // Update monitor positions and settings from profile
         for state in view.monitors_mut() {
             if let Some(config) = config_map.get(state.info.name.as_str()) {
                 // Sanity check: don't apply positions that are clearly wrong
@@ -286,6 +286,27 @@ impl App {
                         config.y,
                         state.info.name
                     );
+                }
+
+                // Apply mode dimensions and scaling from profile
+                state.mode_width = config.width;
+                state.mode_height = config.height;
+                state.refresh = config.refresh;
+                state.rotation = config.rotation;
+                state.scale = config.scale;
+                state.enabled = config.enabled;
+
+                // Update visual rect to effective (scaled) dimensions
+                let (rot_w, rot_h) = match config.rotation {
+                    90 | 270 => (config.height, config.width),
+                    _ => (config.width, config.height),
+                };
+                if (config.scale - 1.0).abs() < 0.001 {
+                    state.info.rect.width = rot_w;
+                    state.info.rect.height = rot_h;
+                } else {
+                    state.info.rect.width = (rot_w as f64 / config.scale).round() as u32;
+                    state.info.rect.height = (rot_h as f64 / config.scale).round() as u32;
                 }
             }
         }
@@ -581,6 +602,59 @@ impl App {
         }
     }
 
+    /// Refit the window to the current screen after a display change.
+    /// Uses root window geometry (which reflects the effective screen size after
+    /// transforms/scaling) rather than monitor detection (which returns raw mode sizes).
+    fn refit_window(&mut self) {
+        // Sync to ensure screen resize has been processed by the X server
+        let _ = self.conn.sync();
+
+        // Query root window geometry for actual effective screen dimensions
+        let (scr_w, scr_h) = match self.conn.inner().get_geometry(self.conn.root()) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(geom) => (geom.width as u32, geom.height as u32),
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+
+        let win_w = WINDOW_WIDTH.min(scr_w.saturating_sub(40));
+        let win_h = WINDOW_HEIGHT.min(scr_h.saturating_sub(40));
+        let x = (scr_w as i32 - win_w as i32) / 2;
+        let y = (scr_h as i32 - win_h as i32) / 2;
+
+        tracing::info!(
+            "refit_window: screen={}x{}, requesting window {}x{} at ({}, {})",
+            scr_w, scr_h, win_w, win_h, x, y
+        );
+
+        if let Err(e) = self.window.set_geometry(Rect::new(x, y, win_w, win_h)) {
+            tracing::warn!("failed to refit window: {}", e);
+            return;
+        }
+
+        // Flush and sync so the WM processes the configure request
+        let _ = self.conn.flush();
+        let _ = self.conn.sync();
+
+        // Query ACTUAL window geometry (WM may have adjusted our request)
+        let (actual_w, actual_h) = match self.conn.inner().get_geometry(self.window.id()) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(geom) => (geom.width as u32, geom.height as u32),
+                Err(_) => (win_w, win_h),
+            },
+            Err(_) => (win_w, win_h),
+        };
+
+        tracing::info!(
+            "refit_window: actual window size after WM = {}x{}",
+            actual_w, actual_h
+        );
+
+        // Update renderer and layout to match actual window size
+        self.handle_resize(Size::new(actual_w, actual_h));
+    }
+
     /// Update the cursor based on monitor view state.
     fn update_cursor(&mut self) {
         let shape = self.monitor_view.cursor_shape();
@@ -635,11 +709,13 @@ impl App {
                 output.map(|o| o.modes.len()).unwrap_or(0)
             );
 
+            // Pass mode_width/mode_height (raw resolution) to display panel so
+            // the resolution dropdown shows actual hardware modes, not scaled values.
             self.display_panel.set_selected_monitor(
                 Some(&state.info.name),
                 output,
-                state.info.rect.width,
-                state.info.rect.height,
+                state.mode_width,
+                state.mode_height,
                 state.refresh,
                 state.rotation,
                 state.scale,
@@ -656,9 +732,6 @@ impl App {
         let randr = self.randr.as_ref()?;
         let outputs = randr.get_outputs().ok()?;
 
-        // Capture current DPI scale
-        let current_scale = dpi::get_current_scale();
-
         Some(
             outputs
                 .iter()
@@ -666,6 +739,11 @@ impl App {
                 .map(|o| {
                     let mode = o.current_mode.as_ref().unwrap();
                     let pos = o.position.unwrap_or((0, 0));
+                    // Read per-monitor scale from CRTC transform
+                    let scale = o
+                        .crtc
+                        .map(|c| randr.get_crtc_scale(c))
+                        .unwrap_or(1.0);
                     MonitorConfig {
                         name: o.name.clone(),
                         enabled: true,
@@ -674,8 +752,8 @@ impl App {
                         width: mode.width as u32,
                         height: mode.height as u32,
                         refresh: mode.refresh,
-                        scale: current_scale, // Capture current DPI scale
-                        rotation: 0,          // TODO: capture actual rotation
+                        scale,
+                        rotation: 0, // TODO: capture actual rotation
                     }
                 })
                 .collect(),
@@ -698,6 +776,8 @@ impl App {
         self.pre_change_config = self.capture_current_randr_state();
 
         // Build MonitorConfig from current view state
+        // Use mode_width/mode_height (raw hardware resolution) for the RandR mode,
+        // not info.rect which holds effective (scaled) dimensions.
         let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
         let configs: Vec<MonitorConfig> = self
             .monitor_view
@@ -708,22 +788,21 @@ impl App {
                 enabled: state.enabled,
                 x: state.real_position.x,
                 y: state.real_position.y,
-                width: state.info.rect.width,
-                height: state.info.rect.height,
+                width: state.mode_width,
+                height: state.mode_height,
                 refresh: state.refresh,
                 scale: state.scale,
                 rotation: state.rotation,
             })
             .collect();
 
-        // IMPORTANT: Prepare the screen size BEFORE applying any configurations
-        // This is essential for rotation changes which may require a larger virtual screen
-        if let Err(e) = randr.prepare_screen_for_configs(&configs) {
-            tracing::error!("failed to prepare screen size: {}", e);
-            self.set_status(&format!("Failed to prepare screen: {}", e));
-            return;
-        }
-
+        // Apply CRTCs using the same approach as xrandr:
+        // 1. Apply each CRTC (ensure_screen_size inside apply_monitor grows if needed)
+        // 2. Shrink the screen to fit effective dimensions after all CRTCs are applied
+        //
+        // When scaling down (e.g., 2x), the CRTC transform reduces the scanout size
+        // (2880x1800 mode at 2x → 1440x900 scanout), so it always fits within the
+        // current screen. The screen is then shrunk to match after all CRTCs are set.
         let mut success_count = 0;
         let mut error_count = 0;
 
@@ -737,6 +816,13 @@ impl App {
             }
         }
 
+        // Shrink the screen to fit the effective (post-transform) dimensions.
+        // This must happen AFTER all CRTCs are applied so the server knows the
+        // actual scanout sizes. This matches xrandr's behavior.
+        if let Err(e) = randr.shrink_screen_to_fit() {
+            tracing::error!("failed to shrink screen: {}", e);
+        }
+
         // Set primary
         if let Some(ref name) = primary_name {
             if let Err(e) = randr.set_primary(name) {
@@ -748,13 +834,7 @@ impl App {
             tracing::error!("failed to flush: {}", e);
         }
 
-        // Try to shrink screen to fit (non-fatal if it fails)
-        if let Err(e) = randr.shrink_screen_to_fit() {
-            tracing::debug!("shrink_screen_to_fit failed (non-fatal): {}", e);
-        }
-
         // Apply DPI scaling if any monitor has non-1.0 scale
-        // Use the primary monitor's scale, or the first enabled monitor
         let scale = configs
             .iter()
             .find(|c| c.enabled && primary_name.as_ref() == Some(&c.name))
@@ -764,7 +844,6 @@ impl App {
 
         if let Err(e) = dpi::apply_dpi_scale(scale) {
             tracing::error!("failed to apply DPI scale: {}", e);
-            // Non-fatal - continue with the rest
         }
 
         if error_count > 0 {
@@ -793,7 +872,10 @@ impl App {
             }
         }
 
-        // Show confirmation overlay
+        // Refit window to the new screen dimensions before showing overlay
+        self.refit_window();
+
+        // Show confirmation overlay (uses current window size after refit)
         let size = self.window.size();
         let window_rect = Rect::new(0, 0, size.width, size.height);
         self.confirm_overlay = Some(ConfirmOverlay::new(window_rect));
@@ -809,7 +891,10 @@ impl App {
         watchdog::cancel_watchdog();
         self.watchdog_child = None;
 
-        // Update original_monitors to current state
+        // Update original_monitors to current state.
+        // Use mode_width/mode_height (raw hardware resolution) so that revert_layout
+        // can find the correct RandR mode. info.rect holds effective (scaled) dimensions
+        // which may not correspond to an actual mode.
         let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
         self.original_monitors = self
             .monitor_view
@@ -820,8 +905,8 @@ impl App {
                 rect: Rect::new(
                     state.real_position.x,
                     state.real_position.y,
-                    state.info.rect.width,
-                    state.info.rect.height,
+                    state.mode_width,
+                    state.mode_height,
                 ),
                 primary: primary_name.as_ref() == Some(&state.info.name),
                 width_mm: state.info.width_mm,
@@ -829,6 +914,7 @@ impl App {
             })
             .collect();
 
+        self.refit_window();
         self.set_status("Display settings confirmed");
         self.monitor_view.clear_dirty();
     }
@@ -843,24 +929,14 @@ impl App {
 
         if let Some(ref configs) = self.pre_change_config.take() {
             if let Some(ref randr) = self.randr {
-                // IMPORTANT: Prepare screen size BEFORE reverting
-                // The pre-change config may have different dimensions than current
-                if let Err(e) = randr.prepare_screen_for_configs(configs) {
-                    tracing::error!("failed to prepare screen for revert: {}", e);
-                    // Continue anyway - we still want to try to revert
-                }
-
+                // Apply CRTCs (ensure_screen_size inside grows if needed), then shrink
                 for config in configs {
                     if let Err(e) = randr.apply_monitor(config) {
                         tracing::error!("failed to revert {}: {}", config.name, e);
                     }
                 }
+                let _ = randr.shrink_screen_to_fit();
                 let _ = randr.flush();
-
-                // Try to shrink screen to fit
-                if let Err(e) = randr.shrink_screen_to_fit() {
-                    tracing::debug!("shrink_screen_to_fit failed during revert: {}", e);
-                }
 
                 // Restore DPI scale from pre-change config
                 let scale = configs
@@ -876,6 +952,7 @@ impl App {
 
         // Reset view to original monitors
         self.monitor_view.set_monitors(self.original_monitors.clone());
+        self.refit_window();
         self.set_status("Display settings reverted");
     }
 
@@ -891,10 +968,12 @@ impl App {
         // Restore original monitors in view
         self.monitor_view.set_monitors(self.original_monitors.clone());
 
-        // Apply via RandR
+        // Apply via RandR using disable→resize→apply pattern
         if let Some(ref randr) = self.randr {
-            for m in &self.original_monitors {
-                let config = MonitorConfig {
+            let configs: Vec<MonitorConfig> = self
+                .original_monitors
+                .iter()
+                .map(|m| MonitorConfig {
                     name: m.name.clone(),
                     enabled: true,
                     x: m.rect.x,
@@ -904,12 +983,16 @@ impl App {
                     refresh: 60.0,
                     scale: 1.0,
                     rotation: 0,
-                };
+                })
+                .collect();
 
-                if let Err(e) = randr.apply_monitor(&config) {
-                    tracing::error!("failed to revert {}: {}", m.name, e);
+            // Apply CRTCs (ensure_screen_size inside grows if needed), then shrink
+            for config in &configs {
+                if let Err(e) = randr.apply_monitor(config) {
+                    tracing::error!("failed to revert {}: {}", config.name, e);
                 }
             }
+            let _ = randr.shrink_screen_to_fit();
 
             // Restore primary
             if let Some(m) = self.original_monitors.iter().find(|m| m.primary) {
@@ -921,6 +1004,7 @@ impl App {
             let _ = randr.flush();
         }
 
+        self.refit_window();
         self.set_status("Reverted to original layout");
     }
 
@@ -934,21 +1018,21 @@ impl App {
     fn save_profile(&mut self) {
         let primary_name = self.monitor_view.primary_name().map(|s| s.to_string());
 
-        // Build profile from current layout
+        // Build profile from current layout using raw mode dimensions
         let monitors: Vec<MonitorConfig> = self
             .monitor_view
             .monitors()
             .iter()
             .map(|state| MonitorConfig {
                 name: state.info.name.clone(),
-                enabled: true,
+                enabled: state.enabled,
                 x: state.real_position.x,
                 y: state.real_position.y,
-                width: state.info.rect.width,
-                height: state.info.rect.height,
-                refresh: 60.0,
-                scale: 1.0,
-                rotation: 0,
+                width: state.mode_width,
+                height: state.mode_height,
+                refresh: state.refresh,
+                scale: state.scale,
+                rotation: state.rotation,
             })
             .collect();
 
@@ -984,14 +1068,14 @@ impl App {
             .iter()
             .map(|state| MonitorConfig {
                 name: state.info.name.clone(),
-                enabled: true,
+                enabled: state.enabled,
                 x: state.real_position.x,
                 y: state.real_position.y,
-                width: state.info.rect.width,
-                height: state.info.rect.height,
-                refresh: 60.0,
-                scale: 1.0,
-                rotation: 0,
+                width: state.mode_width,
+                height: state.mode_height,
+                refresh: state.refresh,
+                scale: state.scale,
+                rotation: state.rotation,
             })
             .collect();
 
